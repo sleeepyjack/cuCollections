@@ -40,7 +40,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_static_multimap_i
   std::vector<Key> h_keys(num_keys);
   std::vector<cuco::pair_type<Key, Value>> h_pairs(num_keys);
 
-  generate_keys<Dist, Multiplicity, Key>(h_keys.begin(), h_keys.end());
+  generate_keys<Key>(Dist, h_keys.begin(), h_keys.end(), Multiplicity);
 
   for (auto i = 0; i < num_keys; ++i) {
     Key key           = h_keys[i];
@@ -91,7 +91,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_static_multimap_c
   std::vector<Key> h_keys(num_keys);
   std::vector<cuco::pair_type<Key, Value>> h_pairs(num_keys);
 
-  generate_keys<Dist, Multiplicity, Key>(h_keys.begin(), h_keys.end());
+  generate_keys<Key>(Dist, h_keys.begin(), h_keys.end(), Multiplicity);
 
   for (auto i = 0; i < num_keys; ++i) {
     Key key           = h_keys[i];
@@ -145,7 +145,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_static_multimap_f
   std::vector<Key> h_keys(num_keys);
   std::vector<cuco::pair_type<Key, Value>> h_pairs(num_keys);
 
-  generate_keys<Dist, Multiplicity, Key>(h_keys.begin(), h_keys.end());
+  generate_keys<Key>(Dist, h_keys.begin(), h_keys.end(), Multiplicity);
 
   for (auto i = 0; i < num_keys; ++i) {
     Key key           = h_keys[i];
@@ -202,7 +202,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> nvbench_static_multimap_r
   std::vector<Key> h_keys(num_keys);
   std::vector<cuco::pair_type<Key, Value>> h_pairs(num_keys);
 
-  generate_keys<Dist, Multiplicity, Key>(h_keys.begin(), h_keys.end());
+  generate_keys<Key>(Dist, h_keys.begin(), h_keys.end(), Multiplicity);
 
   for (auto i = 0; i < num_keys; ++i) {
     Key key           = h_keys[i];

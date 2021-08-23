@@ -42,15 +42,18 @@ NVBENCH_DECLARE_ENUM_TYPE_STRINGS(
   // Just use `[](auto) { return std::string{}; }` if you don't want these.
   [](auto) { return std::string{}; })
 
-template <dist_type Dist, std::size_t Multiplicity, typename Key, typename OutputIt>
-static void generate_keys(OutputIt output_begin, OutputIt output_end)
+template <typename Key, typename OutputIt>
+static void generate_keys(dist_type dist,
+                          OutputIt output_begin,
+                          OutputIt output_end,
+                          std::size_t multiplicity = 8)
 {
   auto const num_keys = std::distance(output_begin, output_end);
 
   std::random_device rd;
   std::mt19937 gen{rd()};
 
-  switch (Dist) {
+  switch (dist) {
     case dist_type::GAUSSIAN: {
       auto const mean = static_cast<double>(num_keys / 2);
       auto const dev  = static_cast<double>(num_keys / 5);
@@ -78,7 +81,7 @@ static void generate_keys(OutputIt output_begin, OutputIt output_end)
       break;
     }
     case dist_type::UNIFORM: {
-      std::uniform_int_distribution<Key> distribution{1, static_cast<Key>(num_keys / Multiplicity)};
+      std::uniform_int_distribution<Key> distribution{1, static_cast<Key>(num_keys / multiplicity)};
 
       for (auto i = 0; i < num_keys; ++i) {
         output_begin[i] = distribution(gen);
@@ -109,4 +112,28 @@ static void generate_prob_keys(double const matching_rate,
   }
 
   std::random_shuffle(output_begin, output_end);
+}
+
+template <typename Key, typename OutputIt>
+static void generate_join_keys(OutputIt r_begin,
+                               OutputIt r_end,
+                               OutputIt s_begin,
+                               OutputIt s_end,
+                               float matching_rate      = 1.0,
+                               std::size_t multiplicity = 1)
+{
+  std::size_t const r_size = std::distance(r_begin, r_end);
+  std::size_t const s_size = std::distance(s_begin, s_end);
+
+  generate_keys<Key>(dist_type::UNIFORM, r_begin, r_end, multiplicity);
+
+  if (s_size <= r_size) {
+    std::copy(r_begin, r_begin + s_size, s_begin);
+  } else {
+    for (std::size_t offset = 0; offset < s_size; offset += r_size) {
+      std::copy(r_begin, r_begin + std::min(r_size, s_size - offset), s_begin + offset);
+    }
+  }
+
+  generate_prob_keys<Key>(matching_rate, s_begin, s_end);
 }
