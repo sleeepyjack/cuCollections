@@ -89,3 +89,7 @@ ConfigureBench(RBK_BENCH "${RBK_BENCH_SRC}")
 ###################################################################################################
 set(BLOOM_FILTER_BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/bloom_filter/bloom_filter_bench.cu")
 ConfigureNVBench(BLOOM_FILTER_BENCH "${BLOOM_FILTER_BENCH_SRC}")
+
+###################################################################################################
+set(JOIN_BENCH_SRC "${CMAKE_CURRENT_SOURCE_DIR}/join/join_bench.cu")
+ConfigureNVBench(JOIN_BENCH "${JOIN_BENCH_SRC}")
