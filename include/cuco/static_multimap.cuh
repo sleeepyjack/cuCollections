@@ -23,6 +23,7 @@
 #include <memory>
 
 #include <cuco/allocator.hpp>
+#include <cuco/traits.hpp>
 
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 11000) && defined(__CUDA_ARCH__) && \
   (__CUDA_ARCH__ >= 700)
@@ -31,16 +32,13 @@
 
 // cg::memcpy_aysnc is supported for CUDA 11.1 and up
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 11100)
-#define SUPPORTS_CG_MEMCPY_ASYNC 1
-#else
-#define SUPPORTS_CG_MEMCPY_ASYNC 0
+#define CUCO_HAS_CG_MEMCPY_ASYNC
 #endif
 
 #if defined(CUCO_HAS_CUDA_BARRIER)
 #include <cuda/barrier>
 #endif
 
-#include <cuco/detail/bitwise_compare.cuh>
 #include <cuco/detail/error.hpp>
 #include <cuco/detail/prime.hpp>
 #include <cuco/detail/probe_sequences.cuh>
@@ -52,18 +50,20 @@ namespace cuco {
  * @brief A GPU-accelerated, unordered, associative container of key-value
  * pairs that supports equivalent keys.
  *
- * Allows constant time concurrent inserts or concurrent find operations (not
- * concurrent insert and find) from threads in device code.
+ * Allows constant time concurrent inserts or concurrent find operations from threads in device
+ * code. Concurrent insert/find is allowed only when
+ * `static_multimap<Key, Value>::supports_concurrent_insert_find()` is true.
  *
  * Current limitations:
- * - Requires keys and values that where `cuco::detail::is_bitwise_comparable<T>::value` is true
+ * - Requires keys and values where `cuco::is_bitwise_comparable<T>::value` is true
  * - Comparisons against the "sentinel" values will always be done with bitwise comparisons
  * Therefore, the objects must have unique, bitwise object representations (e.g., no padding bits).
  * - Does not support erasing keys
  * - Capacity is fixed and will not grow automatically
  * - Requires the user to specify sentinel values for both key and mapped value
  * to indicate empty slots
- * - Does not support concurrent insert and find operations
+ * - Concurrent insert/find is only supported when `static_multimap<Key,
+ * Value>::supports_concurrent_insert_find()` is true`
  *
  * The `static_multimap` supports two types of operations:
  * - Host-side "bulk" operations
@@ -77,16 +77,16 @@ namespace cuco {
  * The singular device-side operations allow individual threads to perform
  * independent operations (e.g. `insert`, etc.) from device code. These
  * operations are accessed through non-owning, trivially copyable "view" types:
- * `device_view` and `mutable_device_view`. The `device_view` class is an
+ * `device_view` and `device_mutable_view`. The `device_view` class is an
  * immutable view that allows only non-modifying operations such as `count` or
- * `contains`. The `mutable_device_view` class only allows `insert` operations.
+ * `contains`. The `device_mutable_view` class only allows `insert` operations.
  * The two types are separate to prevent erroneous concurrent insert/find
  * operations.
  *
- * Loading two consecutive slots instead of one for small pairs can improve cache utilization since
- * 16B memory loads are natively supported at the SASS/hardware level. This `vector load` method is
- * implicitly applied to all involved operations (e.g. `insert`, `count`, and `retrieve`, etc.) if
- * the pair is packable (see `multimap::uses_vector_load` logic).
+ * By default, query operations (e.g. `count` and `retrieve`) take `Key` as input and do not include
+ * non-matches in the output. APIs with `_outer` suffix should be used if non-match handling is
+ * desired. The `pair_` prefix indicates that the input data are key-value pairs whose type can be
+ * converted to multimap's `value_type`.
  *
  * Example:
  * \code{.cpp}
@@ -115,28 +115,34 @@ namespace cuco {
  * \endcode
  *
  *
- * @tparam Key Arithmetic type used for key
+ * @tparam Key Type used for keys
  * @tparam Value Type of the mapped values
- * @tparam ProbeSequence Probe sequence used in multimap
- * @tparam Scope The scope in which insert/find operations will be performed by
- * individual threads.
+ * @tparam Scope The scope in which multimap operations will be performed by
+ * individual threads
+ * @tparam ProbeSequence Probe sequence chosen between `cuco::detail::linear_probing`
+ * and `cuco::detail::double_hashing`. (see `detail/probe_sequences.cuh`)
  * @tparam Allocator Type of allocator used for device storage
  */
 template <typename Key,
           typename Value,
-          class ProbeSequence      = cuco::double_hashing<Key, Value>,
           cuda::thread_scope Scope = cuda::thread_scope_device,
+          class ProbeSequence      = cuco::detail::double_hashing<Key,
+                                                             Value,
+                                                             2,
+                                                             cuco::detail::MurmurHash3_32<Key>,
+                                                             cuco::detail::MurmurHash3_32<Key>,
+                                                             Scope>,
           typename Allocator       = cuco::cuda_allocator<char>>
 class static_multimap {
   static_assert(
-    detail::is_bitwise_comparable<Key>::value,
+    cuco::is_bitwise_comparable<Key>::value,
     "Key type must have unique object representations or have been explicitly declared as safe for "
-    "bitwise comparison via specialization of cuco::detail::is_bitwise_comparable<Key>.");
+    "bitwise comparison via specialization of cuco::is_bitwise_comparable<Key>.");
 
   static_assert(
-    detail::is_bitwise_comparable<Value>::value,
+    cuco::is_bitwise_comparable<Value>::value,
     "Value type must have unique object representations or have been explicitly declared as safe "
-    "for bitwise comparison via specialization of cuco::detail::is_bitwise_comparable<Value>.");
+    "for bitwise comparison via specialization of cuco::is_bitwise_comparable<Value>.");
 
  public:
   using value_type         = cuco::pair_type<Key, Value>;
@@ -153,23 +159,33 @@ class static_multimap {
     typename std::allocator_traits<Allocator>::rebind_alloc<atomic_ctr_type>;
 
   static_multimap(static_multimap const&) = delete;
-  static_multimap(static_multimap&&)      = delete;
   static_multimap& operator=(static_multimap const&) = delete;
-  static_multimap& operator=(static_multimap&&) = delete;
+
+  static_multimap(static_multimap&&) = default;
+  static_multimap& operator=(static_multimap&&) = default;
+  ~static_multimap()                            = default;
 
   /**
-   * @brief Indicate the warp size.
+   * @brief Indicate if concurrent insert/find is supported for the key/value types.
    *
-   * @return The warp size.
+   * @return Boolean indicating if concurrent insert/find is supported.
    */
-  static constexpr uint32_t warp_size() noexcept { return 32u; }
+  __host__ __device__ static constexpr bool supports_concurrent_insert_find() noexcept
+  {
+    return cuco::detail::is_packable<value_type>();
+  }
 
   /**
    * @brief The size of the CUDA cooperative thread group.
    *
-   * @return Boolean indicating if concurrent insert/find is supported.
+   * @return The CG size.
    */
   static constexpr uint32_t cg_size() noexcept { return ProbeSequence::cg_size(); }
+
+  /**
+   * @brief Default constructor.
+   */
+  static_multimap();
 
   /**
    * @brief Construct a fixed-size map with the specified capacity and sentinel values.
@@ -202,16 +218,11 @@ class static_multimap {
                   Allocator const& alloc = Allocator{});
 
   /**
-   * @brief Destroys the map and frees its contents.
-   *
-   */
-  ~static_multimap();
-
-  /**
    * @brief Inserts all key/value pairs in the range `[first, last)`.
    *
-   * @tparam InputIt Device accessible input iterator whose `value_type` is
-   * convertible to the map's `value_type`
+   * @tparam InputIt Device accessible random access input iterator where
+   * `std::is_converitble<std::iterator_traits<InputIt>::value_type,
+   * static_multimap<K, V>::value_type>` is `true`
    * @param first Beginning of the sequence of key/value pairs
    * @param last End of the sequence of key/value pairs
    * @param stream CUDA stream used for insert
@@ -220,33 +231,42 @@ class static_multimap {
   void insert(InputIt first, InputIt last, cudaStream_t stream = 0);
 
   /**
-   * @brief Inserts key/value pairs in the range `[first, last)` if `pred` returns true.
+   * @brief Inserts key/value pairs in the range `[first, first + n)` if `pred`
+   * of the corresponding stencil returns true.
    *
-   * @tparam InputIt Device accessible input iterator whose `value_type` is
-   * convertible to the map's `value_type`
-   * @tparam Predicate Unary predicate function type
-   * @tparam KeyEqual Binary callable type
+   * The key/value pair `*(first + i)` is inserted if `pred( *(stencil + i) )` returns true.
+   *
+   * @tparam InputIt Device accessible random access input iterator where
+   * `std::is_converitble<std::iterator_traits<InputIt>::value_type,
+   * static_multimap<K, V>::value_type>` is `true`
+   * @tparam StencilIt Device accessible random access iterator whose value_type is
+   * convertible to Predicate's argument type
+   * @tparam Predicate Unary predicate callable
    * @param first Beginning of the sequence of key/value pairs
    * @param last End of the sequence of key/value pairs
+   * @param stencil Beginning of the stencil sequence
+   * @param pred Predicate to test on every element in the range `[stencil, stencil +
+   * std::distance(first, last))`
    * @param stream CUDA stream used for insert
-   * @param key_equal The binary function to compare two keys for equality
    */
-  template <typename InputIt, typename Predicate>
-  void insert_if(InputIt first, InputIt last, Predicate pred, cudaStream_t stream = 0);
+  template <typename InputIt, typename StencilIt, typename Predicate>
+  void insert_if(
+    InputIt first, InputIt last, StencilIt stencil, Predicate pred, cudaStream_t stream = 0);
 
   /**
    * @brief Indicates whether the keys in the range `[first, last)` are contained in the map.
    *
-   * Writes a `bool` to `(output + i)` indicating if the key `*(first + i)` exists in the map.
+   * Stores `true` or `false` to `(output + i)` indicating if the key `*(first + i)` exists in the
+   * map.
    *
    * @tparam InputIt Device accessible input iterator whose `value_type` is
    * convertible to the map's `key_type`
    * @tparam OutputIt Device accessible output iterator whose `value_type` is
-   * convertible to the map's `mapped_type`
-   * @tparam KeyEqual Binary callable type
+   * convertible from `bool`
+   * @tparam KeyEqual Binary callable type used to compare two keys for equality
    * @param first Beginning of the sequence of keys
    * @param last End of the sequence of keys
-   * @param output_begin Beginning of the sequence of booleans for the presence of each key
+   * @param output_begin Beginning of the output sequence indicating whether each key is present
    * @param stream CUDA stream used for contains
    * @param key_equal The binary function to compare two keys for equality
    */
@@ -266,7 +286,7 @@ class static_multimap {
    * @param last End of the sequence of keys to count
    * @param stream CUDA stream used for count
    * @param key_equal Binary function to compare two keys for equality
-   * @return The sum of total occurrences of all keys in `[first,last)`
+   * @return The sum of total occurrences of all keys in `[first, last)`
    */
   template <typename InputIt, typename KeyEqual = thrust::equal_to<key_type>>
   std::size_t count(InputIt first,
@@ -275,8 +295,9 @@ class static_multimap {
                     KeyEqual key_equal  = KeyEqual{}) const;
 
   /**
-   * @brief Counts the occurrences of keys in `[first, last)` contained in the multimap. If no
-   * matches can be found for a given key, the corresponding occurrence is 1.
+   * @brief Counts the occurrences of keys in `[first, last)` contained in the multimap.
+   *
+   * The `_outer` suffix signifies that the occurrence of non-matches is 1.
    *
    * @tparam Input Device accesible input iterator whose `value_type` is convertible to `key_type`
    * @tparam KeyEqual Binary callable
@@ -284,7 +305,7 @@ class static_multimap {
    * @param last End of the sequence of keys to count
    * @param stream CUDA stream used for count_outer
    * @param key_equal Binary function to compare two keys for equality
-   * @return The sum of total occurrences of all keys in `[first,last)`
+   * @return The sum of total occurrences of all keys in `[first, last)`
    */
   template <typename InputIt, typename KeyEqual = thrust::equal_to<key_type>>
   std::size_t count_outer(InputIt first,
@@ -295,13 +316,17 @@ class static_multimap {
   /**
    * @brief Counts the occurrences of key/value pairs in `[first, last)` contained in the multimap.
    *
-   * @tparam Input Device accesible input iterator of key/value pairs
+   * The `pair_` prefix indicates that the input data type is convertible to the map's `value_type`.
+   *
+   * @tparam InputIt Device accessible random access input iterator where
+   * `std::is_converitble<std::iterator_traits<InputIt>::value_type,
+   * static_multimap<K, V>::value_type>` is `true`
    * @tparam PairEqual Binary callable
    * @param first Beginning of the sequence of pairs to count
    * @param last End of the sequence of pairs to count
    * @param pair_equal Binary function to compare two pairs for equality
    * @param stream CUDA stream used for pair_count
-   * @return The sum of total occurrences of all pairs in `[first,last)`
+   * @return The sum of total occurrences of all pairs in `[first, last)`
    */
   template <typename InputIt, typename PairEqual>
   std::size_t pair_count(InputIt first,
@@ -311,15 +336,19 @@ class static_multimap {
 
   /**
    * @brief Counts the occurrences of key/value pairs in `[first, last)` contained in the multimap.
-   * If no matches can be found for a given key/value pair, the corresponding occurrence is 1.
    *
-   * @tparam Input Device accesible input iterator of key/value pairs
+   * The `pair_` prefix indicates that the input data type is convertible to the map's `value_type`.
+   * The `_outer` suffix signifies that the occurrence of non-matches is 1.
+   *
+   * @tparam InputIt Device accessible random access input iterator where
+   * `std::is_converitble<std::iterator_traits<InputIt>::value_type,
+   * static_multimap<K, V>::value_type>` is `true`
    * @tparam PairEqual Binary callable
    * @param first Beginning of the sequence of pairs to count
    * @param last End of the sequence of pairs to count
    * @param pair_equal Binary function to compare two pairs for equality
    * @param stream CUDA stream used for pair_count_outer
-   * @return The sum of total occurrences of all pairs in `[first,last)`
+   * @return The sum of total occurrences of all pairs in `[first, last)`
    */
   template <typename InputIt, typename PairEqual>
   std::size_t pair_count_outer(InputIt first,
@@ -328,7 +357,7 @@ class static_multimap {
                                cudaStream_t stream = 0) const;
 
   /**
-   * @brief Finds all the values corresponding to all keys in the range `[first, last)`.
+   * @brief Retrieves all the values corresponding to all keys in the range `[first, last)`.
    *
    * If the key `k = *(first + i)` exists in the map, copies `k` and all associated values to
    * unspecified locations in `[output_begin, output_end)`. Else, does nothing.
@@ -356,11 +385,11 @@ class static_multimap {
                     KeyEqual key_equal  = KeyEqual{}) const;
 
   /**
-   * @brief Finds all the matches corresponding to all keys in the range `[first, last)`.
+   * @brief Retrieves all the matches corresponding to all keys in the range `[first, last)`.
    *
-   * If the key `k = *(first + i)` exists in the map, copies `k` and all associated values to
-   * unspecified locations in `[output_begin, output_end)`. Else, copies `k` and the empty value
-   * sentinel.
+   * The `_outer` suffix signifies that non-matches are included in the output: If the key
+   * `k = *(first + i)` exists in the map, copies `k` and all associated values to unspecified
+   * locations in `[output_begin, output_end)`. Else, copies `k` and the empty value sentinel.
    *
    * Behavior is undefined if the total number of matching keys exceeds `std::distance(output_begin,
    * output_end)`. Use `count_outer()` to determine the number of matching keys.
@@ -385,17 +414,20 @@ class static_multimap {
                           KeyEqual key_equal  = KeyEqual{}) const;
 
   /**
-   * @brief Finds all pairs matching the input probe pair in the range `[first, last)`.
+   * @brief Retrieves all pairs matching the input probe pair in the range `[first, last)`.
    *
-   * if pair_equal(*(first + i), slot[j]) returns true, then *(first+i) is stored to
-   * `probe_output_begin`, and slot[j] is stored to `contained_output_begin`.
+   * The `pair_` prefix indicates that the input data type is convertible to the map's
+   * `value_type`. If pair_equal(*(first + i), slot[j]) returns true, then *(first+i) is
+   * stored to `probe_output_begin`, and slot[j] is stored to `contained_output_begin`.
    *
    * Behavior is undefined if the total number of matching pairs exceeds
    * `std::distance(probe_output_begin, probe_output_end)` (or
    * `std::distance(contained_output_begin, contained_output_end)`). Use
    * `pair_count()` to determine the number of matching pairs.
    *
-   * @tparam InputIt Device accessible input iterator for probe pairs
+   * @tparam InputIt Device accessible random access input iterator where
+   * `std::is_converitble<std::iterator_traits<InputIt>::value_type,
+   * static_multimap<K, V>::value_type>` is `true`
    * @tparam OutputZipIt1 Device accessible output zip iterator for probe matches
    * @tparam OutputZipIt2 Device accessible output zip iterator for contained matches
    * @tparam PairEqual Binary callable type
@@ -404,7 +436,7 @@ class static_multimap {
    * @param probe_output_begin Beginning of the sequence of the matched probe pairs
    * @param contained_output_begin Beginning of the sequence of the matched contained pairs
    * @param pair_equal The binary function to compare two pairs for equality
-   * @param stream CUDA stream used for retrieve_outer
+   * @param stream CUDA stream used for pair_retrieve
    * @return The total number of matches
    */
   template <typename InputIt, typename OutputZipIt1, typename OutputZipIt2, typename PairEqual>
@@ -416,9 +448,11 @@ class static_multimap {
                             cudaStream_t stream = 0) const;
 
   /**
-   * @brief Finds all pairs matching the input probe pair in the range `[first, last)`.
+   * @brief Retrieves all pairs matching the input probe pair in the range `[first, last)`.
    *
-   * if pair_equal(*(first + i), slot[j]) returns true, then *(first+i) is stored to
+   * The `pair_` prefix indicates that the input data type is convertible to the map's `value_type`.
+   * The `_outer` suffix signifies that non-matches are included in the output: if
+   * pair_equal(*(first + i), slot[j]) returns true, then *(first+i) is stored to
    * `probe_output_begin`, and slot[j] is stored to `contained_output_begin`. If *(first+i) doesn't
    * have matches in the map, copies *(first + i) in `probe_output_begin` and a pair of
    * `empty_key_sentinel` and `empty_value_sentinel` in `contained_output_begin`.
@@ -428,7 +462,9 @@ class static_multimap {
    * `std::distance(contained_output_begin, contained_output_end)`). Use
    * `pair_count()` to determine the number of matching pairs.
    *
-   * @tparam InputIt Device accessible input iterator for probe pairs
+   * @tparam InputIt Device accessible random access input iterator where
+   * `std::is_converitble<std::iterator_traits<InputIt>::value_type,
+   * static_multimap<K, V>::value_type>` is `true`
    * @tparam OutputZipIt1 Device accessible output zip iterator for probe matches
    * @tparam OutputZipIt2 Device accessible output zip iterator for contained matches
    * @tparam PairEqual Binary callable type
@@ -437,7 +473,7 @@ class static_multimap {
    * @param probe_output_begin Beginning of the sequence of the matched probe pairs
    * @param contained_output_begin Beginning of the sequence of the matched contained pairs
    * @param pair_equal The binary function to compare two pairs for equality
-   * @param stream CUDA stream used for retrieve_outer
+   * @param stream CUDA stream used for pair_retrieve_outer
    * @return The total number of matches
    */
   template <typename InputIt, typename OutputZipIt1, typename OutputZipIt2, typename PairEqual>
@@ -450,18 +486,74 @@ class static_multimap {
 
  private:
   /**
-   * @brief Indicate if vector load is used.
+   * @brief Indicates if vector-load is used.
    *
-   * @return Boolean indicating if vector load is used.
+   * Users have no explicit control on whether vector-load is used.
+   *
+   * @return Boolean indicating if vector-load is used.
    */
   static constexpr bool uses_vector_load() noexcept { return ProbeSequence::uses_vector_load(); }
 
   /**
-   * @brief The number of elements for each vector load
-   *
-   * @return The number of elements for each vector load.
+   * @brief Returns the number of pairs loaded with each vector-load
    */
   static constexpr uint32_t vector_width() noexcept { return ProbeSequence::vector_width(); }
+
+  /**
+   * @brief Returns the warp size.
+   */
+  static constexpr uint32_t warp_size() noexcept { return 32u; }
+
+  /**
+   * @brief Custom deleter for unique pointer of device counter.
+   */
+  struct counter_deleter {
+    counter_deleter(counter_allocator_type& a, cudaStream_t& s) : allocator{a}, stream{s} {}
+
+    counter_deleter(counter_deleter const&) = default;
+
+    void operator()(atomic_ctr_type* ptr) { allocator.deallocate(ptr, 1, stream); }
+
+    counter_deleter& operator=(counter_deleter&& other)
+    {
+      if (this != &other) {
+        allocator = other.allocator;
+        stream    = other.stream;
+      }
+      return *this;
+    }
+
+    counter_allocator_type& allocator;
+    cudaStream_t& stream;
+  };
+
+  /**
+   * @brief Custom deleter for unique pointer of slots.
+   */
+  struct slot_deleter {
+    slot_deleter(slot_allocator_type& a, size_t& c, cudaStream_t& s)
+      : allocator{a}, capacity{c}, stream{s}
+    {
+    }
+
+    slot_deleter(slot_deleter const&) = default;
+
+    void operator()(pair_atomic_type* ptr) { allocator.deallocate(ptr, capacity, stream); }
+
+    slot_deleter& operator=(slot_deleter&& other)
+    {
+      if (this != &other) {
+        allocator = other.allocator;
+        capacity  = other.capacity;
+        stream    = other.stream;
+      }
+      return *this;
+    }
+
+    slot_allocator_type& allocator;
+    size_t& capacity;
+    cudaStream_t& stream;
+  };
 
   class device_view_base {
    protected:
@@ -473,16 +565,16 @@ class static_multimap {
     using const_iterator = pair_atomic_type const*;
 
     /**
-     * @brief Indicate if vector load is used.
+     * @brief Indicates if vector-load is used.
      *
-     * @return Boolean indicating if vector load is used.
+     * Users have no explicit control on whether vector-load is used.
+     *
+     * @return Boolean indicating if vector-load is used.
      */
     static constexpr bool uses_vector_load() noexcept { return ProbeSequence::uses_vector_load(); }
 
     /**
-     * @brief The number of elements for each vector load
-     *
-     * @return The number of elements for each vector load.
+     * @brief Returns the number of pairs loaded with each vector-load
      */
     static constexpr uint32_t vector_width() noexcept { return ProbeSequence::vector_width(); }
 
@@ -495,7 +587,7 @@ class static_multimap {
     __device__ void load_pair_array(value_type* arr, const_iterator current_slot) noexcept;
 
    private:
-    ProbeSequence probe_sequence_;
+    ProbeSequence probe_sequence_;  ///< Probe sequence used to probe the hash map
     Key empty_key_sentinel_{};      ///< Key value that represents an empty slot
     Value empty_value_sentinel_{};  ///< Initial Value of empty slot
 
@@ -628,7 +720,7 @@ class static_multimap {
    * // Inserts a sequence of pairs {{0,0}, {1,1}, ... {i,i}}
    * thrust::for_each(thrust::make_counting_iterator(0),
    *                  thrust::make_counting_iterator(50'000),
-   *                  [map = m.get_mutable_device_view()]
+   *                  [map = m.get_device_mutable_view()]
    *                  __device__ (auto i) mutable {
    *                     map.insert(thrust::make_pair(i,i));
    *                  });
@@ -694,8 +786,8 @@ class static_multimap {
                                               value_type const& insert_pair) noexcept;
 
     /**
-     * @brief Inserts the specified key/value pair with a CAS of the key and a dependent write of
-     * the value.
+     * @brief Inserts the specified key/value pair with a CAS of the key and a dependent write
+     * of the value.
      *
      * @param current_slot The slot to insert
      * @param insert_pair The pair to insert
@@ -707,7 +799,7 @@ class static_multimap {
     /**
      * @brief Inserts the specified key/value pair into the map using vector loads.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
      * @tparam CG Cooperative Group type
      *
      * @param g The Cooperative Group that performs the insert
@@ -721,7 +813,7 @@ class static_multimap {
     /**
      * @brief Inserts the specified key/value pair into the map using scalar loads.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
      * @tparam CG Cooperative Group type
      *
      * @param g The Cooperative Group that performs the insert
@@ -814,8 +906,8 @@ class static_multimap {
      * @tparam CG The type of the cooperative thread group
      * @param g The cooperative thread group used to copy the slots
      * @param source_device_view `device_view` to copy from
-     * @param memory_to_use Array large enough to support `capacity` elements. Object does not take
-     * the ownership of the memory
+     * @param memory_to_use Array large enough to support `capacity` elements. Object does not
+     * take the ownership of the memory
      * @return Copy of passed `device_view`
      */
     template <typename CG>
@@ -856,13 +948,13 @@ class static_multimap {
     /**
      * @brief Indicates whether the key `k` was inserted into the map using vector loads.
      *
-     * If the key `k` was inserted into the map, find returns
+     * If the key `k` was inserted into the map, `contains` returns
      * true. Otherwise, it returns false. Uses the CUDA Cooperative Groups API to
-     * to leverage multiple threads to perform a single contains operation. This provides a
-     * significant boost in throughput compared to the non Cooperative Group
+     * to leverage multiple threads to perform a single `contains` operation. This provides a
+     * significant boost in throughput compared to the non Cooperative Group based
      * `contains` at moderate to high load factors.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
      * @tparam CG Cooperative Group type
      * @tparam KeyEqual Binary callable type
      * @param g The Cooperative Group used to perform the contains operation
@@ -872,20 +964,21 @@ class static_multimap {
      * @return A boolean indicating whether the key/value pair
      * containing `k` was inserted
      */
-    template <bool uses_vector_load, typename CG, typename KeyEqual = thrust::equal_to<key_type>>
-    __device__ std::enable_if_t<uses_vector_load, bool> contains_impl(
-      CG g, Key const& k, KeyEqual key_equal = KeyEqual{}) noexcept;
+    template <bool uses_vector_load, typename CG, typename KeyEqual>
+    __device__ std::enable_if_t<uses_vector_load, bool> contains_impl(CG g,
+                                                                      Key const& k,
+                                                                      KeyEqual key_equal) noexcept;
 
     /**
      * @brief Indicates whether the key `k` was inserted into the map using scalar loads.
      *
-     * If the key `k` was inserted into the map, find returns
+     * If the key `k` was inserted into the map, `contains` returns
      * true. Otherwise, it returns false. Uses the CUDA Cooperative Groups API to
-     * to leverage multiple threads to perform a single contains operation. This provides a
+     * to leverage multiple threads to perform a single `contains` operation. This provides a
      * significant boost in throughput compared to the non Cooperative Group
      * `contains` at moderate to high load factors.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
      * @tparam CG Cooperative Group type
      * @tparam KeyEqual Binary callable type
      * @param g The Cooperative Group used to perform the contains operation
@@ -895,108 +988,90 @@ class static_multimap {
      * @return A boolean indicating whether the key/value pair
      * containing `k` was inserted
      */
-    template <bool uses_vector_load, typename CG, typename KeyEqual = thrust::equal_to<key_type>>
+    template <bool uses_vector_load, typename CG, typename KeyEqual>
     __device__ std::enable_if_t<not uses_vector_load, bool> contains_impl(
-      CG g, Key const& k, KeyEqual key_equal = KeyEqual{}) noexcept;
+      CG g, Key const& k, KeyEqual key_equal) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key contained in multimap using vector loads.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam CG Cooperative Group type
      * @tparam KeyEqual Binary callable type
      * @param g The Cooperative Group used to perform the count operation
      * @param k The key to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param key_equal The binary callable used to compare two keys
      * for equality
+     * @return Number of matches found by the current thread
      */
-    template <bool uses_vector_load,
-              bool is_outer,
-              typename CG,
-              typename KeyEqual = thrust::equal_to<key_type>>
-    __device__ std::enable_if_t<uses_vector_load, void> count_impl(
-      CG const& g,
-      Key const& k,
-      std::size_t& thread_num_matches,
-      KeyEqual key_equal = KeyEqual{}) noexcept;
+    template <bool uses_vector_load, bool is_outer, typename CG, typename KeyEqual>
+    __device__ std::enable_if_t<uses_vector_load, std::size_t> count_impl(
+      CG const& g, Key const& k, KeyEqual key_equal) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key contained in multimap using scalar loads.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam CG Cooperative Group type
      * @tparam KeyEqual Binary callable type
      * @param g The Cooperative Group used to perform the count operation
      * @param k The key to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param key_equal The binary callable used to compare two keys
      * for equality
+     * @return Number of matches found by the current thread
      */
-    template <bool uses_vector_load,
-              bool is_outer,
-              typename CG,
-              typename KeyEqual = thrust::equal_to<key_type>>
-    __device__ std::enable_if_t<not uses_vector_load, void> count_impl(
-      CG const& g,
-      Key const& k,
-      std::size_t& thread_num_matches,
-      KeyEqual key_equal = KeyEqual{}) noexcept;
+    template <bool uses_vector_load, bool is_outer, typename CG, typename KeyEqual>
+    __device__ std::enable_if_t<not uses_vector_load, std::size_t> count_impl(
+      CG const& g, Key const& k, KeyEqual key_equal) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key/value pair contained in multimap using vector
      * loads.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam CG Cooperative Group type
      * @tparam PairEqual Binary callable type
      * @param g The Cooperative Group used to perform the pair_count operation
      * @param pair The pair to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param pair_equal The binary callable used to compare two pairs
      * for equality
+     * @return Number of matches found by the current thread
      */
     template <bool uses_vector_load, bool is_outer, typename CG, typename PairEqual>
-    __device__ std::enable_if_t<uses_vector_load, void> pair_count_impl(
-      CG const& g,
-      value_type const& pair,
-      std::size_t& thread_num_matches,
-      PairEqual pair_equal) noexcept;
+    __device__ std::enable_if_t<uses_vector_load, std::size_t> pair_count_impl(
+      CG const& g, value_type const& pair, PairEqual pair_equal) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key/value pair contained in multimap using scalar
      * loads.
      *
-     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used or not
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam uses_vector_load Boolean flag indicating whether vector loads are used
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam CG Cooperative Group type
      * @tparam PairEqual Binary callable type
      * @param g The Cooperative Group used to perform the pair_count operation
      * @param pair The pair to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param pair_equal The binary callable used to compare two pairs
      * for equality
+     * @return Number of matches found by the current thread
      */
     template <bool uses_vector_load, bool is_outer, typename CG, typename PairEqual>
-    __device__ std::enable_if_t<not uses_vector_load, void> pair_count_impl(
-      CG const& g,
-      value_type const& pair,
-      std::size_t& thread_num_matches,
-      PairEqual pair_equal) noexcept;
+    __device__ std::enable_if_t<not uses_vector_load, std::size_t> pair_count_impl(
+      CG const& g, value_type const& pair, PairEqual pair_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given key contained in multimap using vector
+     * @brief Retrieves all the matches of a given key contained in multimap using vector
      * loads with per-warp shared memory buffer.
      *
      * For keys `k = *(first + i)` existing in the map, copies `k` and all associated values to
-     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k` and
-     * the empty value sentinel into the output only if `is_outer` is true.
+     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k`
+     * and the empty value sentinel into the output only if `is_outer` is true.
      *
      * @tparam buffer_size Size of the output buffer
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam warpT Warp (Cooperative Group) type
      * @tparam CG Cooperative Group type
      * @tparam atomicT Type of atomic storage
@@ -1019,7 +1094,7 @@ class static_multimap {
               typename CG,
               typename atomicT,
               typename OutputIt,
-              typename KeyEqual = thrust::equal_to<key_type>>
+              typename KeyEqual>
     __device__ void retrieve_impl(warpT const& warp,
                                   CG const& g,
                                   Key const& k,
@@ -1027,19 +1102,19 @@ class static_multimap {
                                   value_type* output_buffer,
                                   atomicT* num_matches,
                                   OutputIt output_begin,
-                                  KeyEqual key_equal = KeyEqual{}) noexcept;
+                                  KeyEqual key_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given key contained in multimap using scalar
+     * @brief Retrieves all the matches of a given key contained in multimap using scalar
      * loads with per-cg shared memory buffer.
      *
      * For keys `k = *(first + i)` existing in the map, copies `k` and all associated values to
-     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k` and
-     * the empty value sentinel into the output only if `is_outer` is true.
+     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k`
+     * and the empty value sentinel into the output only if `is_outer` is true.
      *
      * @tparam cg_size The number of threads in CUDA Cooperative Groups
      * @tparam buffer_size Size of the output buffer
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam CG Cooperative Group type
      * @tparam atomicT Type of atomic storage
      * @tparam OutputIt Device accessible output iterator whose `value_type` is
@@ -1060,26 +1135,27 @@ class static_multimap {
               typename CG,
               typename atomicT,
               typename OutputIt,
-              typename KeyEqual = thrust::equal_to<key_type>>
+              typename KeyEqual>
     __device__ void retrieve_impl(CG const& g,
                                   Key const& k,
                                   uint32_t* cg_counter,
                                   value_type* output_buffer,
                                   atomicT* num_matches,
                                   OutputIt output_begin,
-                                  KeyEqual key_equal = KeyEqual{}) noexcept;
+                                  KeyEqual key_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given pair contained in multimap using vector
+     * @brief Retrieves all the matches of a given pair contained in multimap using vector
      * loads with per-warp shared memory buffer.
      *
-     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations
+     * in
      * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
-     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and the
-     * empty value sentinels into the output only if `is_outer` is true.
+     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and
+     * the empty value sentinels into the output only if `is_outer` is true.
      *
      * @tparam buffer_size Size of the output buffer
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam warpT Warp (Cooperative Group) type
      * @tparam CG Cooperative Group type
      * @tparam atomicT Type of atomic storage
@@ -1094,7 +1170,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
     template <uint32_t buffer_size,
@@ -1117,17 +1194,18 @@ class static_multimap {
                                        PairEqual pair_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given pair contained in multimap using scalar
+     * @brief Retrieves all the matches of a given pair contained in multimap using scalar
      * loads with per-cg shared memory buffer.
      *
-     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations
+     * in
      * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
-     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and the
-     * empty value sentinels into the output only if `is_outer` is true.
+     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and
+     * the empty value sentinels into the output only if `is_outer` is true.
      *
      * @tparam cg_size The number of threads in CUDA Cooperative Groups
      * @tparam buffer_size Size of the output buffer
-     * @tparam is_outer Boolean flag indicating whether outer join is peformed or not
+     * @tparam is_outer Boolean flag indicating whether outer join is peformed
      * @tparam CG Cooperative Group type
      * @tparam atomicT Type of atomic storage
      * @tparam OutputZipIt1 Device accessible output zip iterator for probe matches
@@ -1140,7 +1218,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
     template <uint32_t cg_size,
@@ -1163,29 +1242,6 @@ class static_multimap {
 
    public:
     /**
-     * @brief Flushes per-CG buffer into the output sequence using CG memcpy_async.
-     *
-     * @tparam CG Cooperative Group type
-     * @tparam atomicT Type of atomic storage
-     * @tparam OutputIt Device accessible output iterator whose `value_type` is
-     * convertible to the map's `mapped_type`
-     * @param g The Cooperative Group used to flush output buffer
-     * @param num_outputs Number of valid output in the buffer
-     * @param output_buffer Buffer of the key/value pair sequence
-     * @param num_matches Size of the output sequence
-     * @param output_begin Beginning of the output sequence of key/value pairs
-     */
-    template <typename CG, typename atomicT, typename OutputIt>
-    __inline__ __device__
-      std::enable_if_t<thrust::is_contiguous_iterator<OutputIt>::value and SUPPORTS_CG_MEMCPY_ASYNC,
-                       void>
-      flush_output_buffer(CG const& g,
-                          uint32_t const num_outputs,
-                          value_type* output_buffer,
-                          atomicT* num_matches,
-                          OutputIt output_begin) noexcept;
-
-    /**
      * @brief Flushes per-CG buffer into the output sequence.
      *
      * @tparam CG Cooperative Group type
@@ -1199,14 +1255,11 @@ class static_multimap {
      * @param output_begin Beginning of the output sequence of key/value pairs
      */
     template <typename CG, typename atomicT, typename OutputIt>
-    __inline__ __device__ std::enable_if_t<not(thrust::is_contiguous_iterator<OutputIt>::value and
-                                               SUPPORTS_CG_MEMCPY_ASYNC),
-                                           void>
-    flush_output_buffer(CG const& g,
-                        uint32_t const num_outputs,
-                        value_type* output_buffer,
-                        atomicT* num_matches,
-                        OutputIt output_begin) noexcept;
+    __inline__ __device__ void flush_output_buffer(CG const& g,
+                                                   uint32_t const num_outputs,
+                                                   value_type* output_buffer,
+                                                   atomicT* num_matches,
+                                                   OutputIt output_begin) noexcept;
 
     /**
      * @brief Flushes per-CG buffer into the output sequences.
@@ -1221,7 +1274,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      */
     template <typename CG, typename atomicT, typename OutputZipIt1, typename OutputZipIt2>
     __inline__ __device__ void flush_output_buffer(CG const& g,
@@ -1235,9 +1289,9 @@ class static_multimap {
     /**
      * @brief Indicates whether the key `k` was inserted into the map.
      *
-     * If the key `k` was inserted into the map, find returns
+     * If the key `k` was inserted into the map, `contains` returns
      * true. Otherwise, it returns false. Uses the CUDA Cooperative Groups API to
-     * to leverage multiple threads to perform a single contains operation. This provides a
+     * to leverage multiple threads to perform a single `contains` operation. This provides a
      * significant boost in throughput compared to the non Cooperative Group
      * `contains` at moderate to high load factors.
      *
@@ -1260,15 +1314,14 @@ class static_multimap {
      * @tparam KeyEqual Binary callable type
      * @param g The Cooperative Group used to perform the count operation
      * @param k The key to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param key_equal The binary callable used to compare two keys
      * for equality
+     * @return Number of matches found by the current thread
      */
     template <typename CG, typename KeyEqual = thrust::equal_to<key_type>>
-    __device__ void count(CG const& g,
-                          Key const& k,
-                          std::size_t& thread_num_matches,
-                          KeyEqual key_equal = KeyEqual{}) noexcept;
+    __device__ std::size_t count(CG const& g,
+                                 Key const& k,
+                                 KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key contained in multimap. If no
@@ -1278,15 +1331,14 @@ class static_multimap {
      * @tparam KeyEqual Binary callable type
      * @param g The Cooperative Group used to perform the count operation
      * @param k The key to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param key_equal The binary callable used to compare two keys
      * for equality
+     * @return Number of matches found by the current thread
      */
     template <typename CG, typename KeyEqual = thrust::equal_to<key_type>>
-    __device__ void count_outer(CG const& g,
-                                Key const& k,
-                                std::size_t& thread_num_matches,
-                                KeyEqual key_equal = KeyEqual{}) noexcept;
+    __device__ std::size_t count_outer(CG const& g,
+                                       Key const& k,
+                                       KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key/value pair contained in multimap.
@@ -1295,15 +1347,14 @@ class static_multimap {
      * @tparam PairEqual Binary callable type
      * @param g The Cooperative Group used to perform the pair_count operation
      * @param pair The pair to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param pair_equal The binary callable used to compare two pairs
      * for equality
+     * @return Number of matches found by the current thread
      */
     template <typename CG, typename PairEqual>
-    __device__ void pair_count(CG const& g,
-                               value_type const& pair,
-                               std::size_t& thread_num_matches,
-                               PairEqual pair_equal) noexcept;
+    __device__ std::size_t pair_count(CG const& g,
+                                      value_type const& pair,
+                                      PairEqual pair_equal) noexcept;
 
     /**
      * @brief Counts the occurrence of a given key/value pair contained in multimap.
@@ -1313,23 +1364,22 @@ class static_multimap {
      * @tparam PairEqual Binary callable type
      * @param g The Cooperative Group used to perform the pair_count operation
      * @param pair The pair to search for
-     * @param thread_num_matches Number of matches found by the current thread
      * @param pair_equal The binary callable used to compare two pairs
      * for equality
+     * @return Number of matches found by the current thread
      */
     template <typename CG, typename PairEqual>
-    __device__ void pair_count_outer(CG const& g,
-                                     value_type const& pair,
-                                     std::size_t& thread_num_matches,
-                                     PairEqual pair_equal) noexcept;
+    __device__ std::size_t pair_count_outer(CG const& g,
+                                            value_type const& pair,
+                                            PairEqual pair_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given key contained in multimap using vector
+     * @brief Retrieves all the matches of a given key contained in multimap using vector
      * loads with per-warp shared memory buffer.
      *
      * For keys `k = *(first + i)` existing in the map, copies `k` and all associated values to
-     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k` and
-     * the empty value sentinel into the output only if `is_outer` is true.
+     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k`
+     * and the empty value sentinel into the output only if `is_outer` is true.
      *
      * @tparam buffer_size Size of the output buffer
      * @tparam warpT Warp (Cooperative Group) type
@@ -1364,12 +1414,12 @@ class static_multimap {
                              KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
-     * @brief Find all the matches of a given key contained in multimap using vector
+     * @brief Retrieves all the matches of a given key contained in multimap using vector
      * loads with per-warp shared memory buffer.
      *
      * For keys `k = *(first + i)` existing in the map, copies `k` and all associated values to
-     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k` and
-     * the empty value sentinel into the output only if `is_outer` is true.
+     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k`
+     * and the empty value sentinel into the output only if `is_outer` is true.
      *
      * @tparam buffer_size Size of the output buffer
      * @tparam warpT Warp (Cooperative Group) type
@@ -1404,7 +1454,7 @@ class static_multimap {
                                    KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
-     * @brief Find all the matches of a given key contained in multimap using scalar
+     * @brief Retrieves all the matches of a given key contained in multimap using scalar
      * loads with per-cg shared memory buffer.
      *
      * For keys `k = *(first + i)` existing in the map, copies `k` and all associated values to
@@ -1441,12 +1491,12 @@ class static_multimap {
                              KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
-     * @brief Find all the matches of a given key contained in multimap using scalar
+     * @brief Retrieves all the matches of a given key contained in multimap using scalar
      * loads with per-cg shared memory buffer.
      *
      * For keys `k = *(first + i)` existing in the map, copies `k` and all associated values to
-     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k` and
-     * the empty value sentinel into the output.
+     * unspecified locations in `[output_begin, output_end)`. In case of non-matches, copies `k`
+     * and the empty value sentinel into the output.
      *
      * @tparam cg_size The number of threads in CUDA Cooperative Groups
      * @tparam buffer_size Size of the output buffer
@@ -1479,10 +1529,11 @@ class static_multimap {
                                    KeyEqual key_equal = KeyEqual{}) noexcept;
 
     /**
-     * @brief Find all the matches of a given pair contained in multimap using vector
+     * @brief Retrieves all the matches of a given pair contained in multimap using vector
      * loads with per-warp shared memory buffer.
      *
-     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations
+     * in
      * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
      * `[contained_output_begin, contained_output_end)`.
      *
@@ -1501,7 +1552,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
     template <uint32_t buffer_size,
@@ -1523,13 +1575,14 @@ class static_multimap {
                                   PairEqual pair_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given pair contained in multimap using vector
+     * @brief Retrieves all the matches of a given pair contained in multimap using vector
      * loads with per-warp shared memory buffer.
      *
-     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations
+     * in
      * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
-     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and the
-     * empty value sentinels into the output.
+     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and
+     * the empty value sentinels into the output.
      *
      * @tparam buffer_size Size of the output buffer
      * @tparam warpT Warp (Cooperative Group) type
@@ -1546,7 +1599,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
     template <uint32_t buffer_size,
@@ -1568,10 +1622,11 @@ class static_multimap {
                                         PairEqual pair_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given pair contained in multimap using scalar
+     * @brief Retrieves all the matches of a given pair contained in multimap using scalar
      * loads with per-cg shared memory buffer.
      *
-     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations
+     * in
      * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
      * `[contained_output_begin, contained_output_end)`.
      *
@@ -1589,7 +1644,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
     template <uint32_t cg_size,
@@ -1610,13 +1666,14 @@ class static_multimap {
                                   PairEqual pair_equal) noexcept;
 
     /**
-     * @brief Find all the matches of a given pair contained in multimap using scalar
+     * @brief Retrieves all the matches of a given pair contained in multimap using scalar
      * loads with per-cg shared memory buffer.
      *
-     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations in
+     * For pair `p`, if pair_equal(p, slot[j]) returns true, copies `p` to unspecified locations
+     * in
      * `[probe_output_begin, probe_output_end)` and copies slot[j] to unspecified locations in
-     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and the
-     * empty value sentinels into the output.
+     * `[contained_output_begin, contained_output_end)`. In case of non-matches, copies `p` and
+     * the empty value sentinels into the output.
      *
      * @tparam cg_size The number of threads in CUDA Cooperative Groups
      * @tparam buffer_size Size of the output buffer
@@ -1632,7 +1689,8 @@ class static_multimap {
      * @param contained_output_buffer Buffer of the matched contained pair sequence
      * @param num_matches Size of the output sequence
      * @param probe_output_begin Beginning of the output sequence of the matched probe pairs
-     * @param contained_output_begin Beginning of the output sequence of the matched contained pairs
+     * @param contained_output_begin Beginning of the output sequence of the matched contained
+     * pairs
      * @param pair_equal The binary callable used to compare two pairs for equality
      */
     template <uint32_t cg_size,
@@ -1651,7 +1709,6 @@ class static_multimap {
                                         OutputZipIt1 probe_output_begin,
                                         OutputZipIt2 contained_output_begin,
                                         PairEqual pair_equal) noexcept;
-
   };  // class device_view
 
   /**
@@ -1690,37 +1747,41 @@ class static_multimap {
   Value get_empty_value_sentinel() const noexcept { return empty_value_sentinel_; }
 
   /**
-   * @brief Constructs a device_view object based on the members of the `static_multimap` object.
+   * @brief Constructs a device_view object based on the members of the `static_multimap`
+   * object.
    *
    * @return A device_view object based on the members of the `static_multimap` object
    */
   device_view get_device_view() const noexcept
   {
-    return device_view(slots_, capacity_, empty_key_sentinel_, empty_value_sentinel_);
+    return device_view(slots_.get(), capacity_, empty_key_sentinel_, empty_value_sentinel_);
   }
 
   /**
-   * @brief Constructs a device_mutable_view object based on the members of the `static_multimap`
-   * object
+   * @brief Constructs a device_mutable_view object based on the members of the
+   * `static_multimap` object
    *
    * @return A device_mutable_view object based on the members of the `static_multimap` object
    */
   device_mutable_view get_device_mutable_view() const noexcept
   {
-    return device_mutable_view(slots_, capacity_, empty_key_sentinel_, empty_value_sentinel_);
+    return device_mutable_view(slots_.get(), capacity_, empty_key_sentinel_, empty_value_sentinel_);
   }
 
  private:
-  pair_atomic_type* slots_{nullptr};            ///< Pointer to flat slots storage
   std::size_t capacity_{};                      ///< Total number of slots
   std::size_t size_{};                          ///< Number of keys in map
   Key empty_key_sentinel_{};                    ///< Key value that represents an empty slot
   Value empty_value_sentinel_{};                ///< Initial value of empty slot
   slot_allocator_type slot_allocator_{};        ///< Allocator used to allocate slots
   counter_allocator_type counter_allocator_{};  ///< Allocator used to allocate counters
-  atomic_ctr_type* d_counter_;
-  cudaStream_t const stream_;
-};  // class static_multimap
+  cudaStream_t stream_{};                       ///< CUDA stream used for ctor/dtor
+  counter_deleter delete_counter_;              ///< Custom counter deleter
+  slot_deleter delete_slots_;                   ///< Custom slots deleter
+  std::unique_ptr<atomic_ctr_type, counter_deleter> d_counter_{};  ///< Preallocated device counter
+  std::unique_ptr<pair_atomic_type, slot_deleter> slots_{};  ///< Pointer to flat slots storage
+};                                                           // class static_multimap
+
 }  // namespace cuco
 
 #include <cuco/detail/static_multimap.inl>
