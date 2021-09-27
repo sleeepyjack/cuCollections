@@ -21,6 +21,8 @@
 
 namespace cuco {
 
+// Constructors
+
 template <typename Key,
           typename Value,
           cuda::thread_scope Scope,
@@ -30,7 +32,8 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::static_multimap()
   : delete_counter_{counter_allocator_, stream_},
     delete_slots_{slot_allocator_, capacity_, stream_},
     d_counter_{nullptr, delete_counter_},
-    slots_{nullptr, delete_slots_}
+    slots_{nullptr, delete_slots_},
+    filter_{}
 {
 }
 
@@ -44,7 +47,8 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::static_multimap(
   Key empty_key_sentinel,
   Value empty_value_sentinel,
   cudaStream_t stream,
-  Allocator const& alloc)
+  Allocator const& alloc,
+  filter_tag tag)
   : capacity_{cuco::detail::get_valid_capacity<cg_size(), vector_width(), uses_vector_load()>(
       capacity)},
     empty_key_sentinel_{empty_key_sentinel},
@@ -55,7 +59,9 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::static_multimap(
     delete_counter_{counter_allocator_, stream_},
     delete_slots_{slot_allocator_, capacity_, stream_},
     d_counter_{counter_allocator_.allocate(1, stream_), delete_counter_},
-    slots_{slot_allocator_.allocate(capacity_, stream_), delete_slots_}
+    slots_{slot_allocator_.allocate(capacity_, stream_), delete_slots_},
+    filter_{
+      tag.filter_size_mb * 8 * 1000 * 1000, tag.num_hashes, stream, alloc, tag.cache_hit_ratio}
 {
   auto constexpr block_size = 128;
   auto const grid_size      = cuco::detail::get_grid_size(
@@ -65,6 +71,8 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::static_multimap(
   detail::initialize<atomic_key_type, atomic_mapped_type><<<grid_size, block_size, 0, stream_>>>(
     slots_.get(), empty_key_sentinel, empty_value_sentinel, get_capacity());
 }
+
+// Host API
 
 template <typename Key,
           typename Value,
@@ -553,6 +561,8 @@ std::size_t static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::pair_r
   return h_counter;
 }
 
+// Device API
+
 template <typename Key,
           typename Value,
           cuda::thread_scope Scope,
@@ -699,7 +709,12 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_mutable_vie
       }
 
       // successful insert
-      if (g.any(status == insert_result::SUCCESS)) { return; }
+      if (g.any(status == insert_result::SUCCESS)) {
+        if (g.thread_rank() == 0 and this->get_filter().get_num_bits() != 0) {
+          this->get_filter().insert(insert_pair.first);
+        }
+        return;
+      }
       // if we've gotten this far, a different key took our spot
       // before we could insert. We need to retry the insert on the
       // same window
@@ -748,7 +763,12 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_mutable_vie
       }
 
       // successful insert
-      if (g.any(status == insert_result::SUCCESS)) { return; }
+      if (g.any(status == insert_result::SUCCESS)) {
+        if (g.thread_rank() == 0 and this->get_filter().get_num_bits() != 0) {
+          this->get_filter().insert(insert_pair.first);
+        }
+        return;
+      }
       // if we've gotten this far, a different key took our spot
       // before we could insert. We need to retry the insert on the
       // same window
@@ -784,6 +804,10 @@ __device__ std::enable_if_t<uses_vector_load, bool>
 static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::contains_impl(
   CG g, Key const& k, KeyEqual key_equal) noexcept
 {
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(k)) {
+    return false;
+  }
+
   auto current_slot = initial_slot(g, k);
 
   while (true) {
@@ -819,6 +843,10 @@ __device__ std::enable_if_t<not uses_vector_load, bool>
 static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::contains_impl(
   CG g, Key const& k, KeyEqual key_equal) noexcept
 {
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(k)) {
+    return false;
+  }
+
   auto current_slot = initial_slot(g, k);
 
   while (true) {
@@ -855,6 +883,14 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::count
   CG const& g, Key const& k, KeyEqual key_equal) noexcept
 {
   std::size_t count = 0;
+
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(k)) {
+    if constexpr (is_outer) {
+      if (g.thread_rank() == 0) { count++; }
+    }
+    return count;
+  }
+
   auto current_slot = initial_slot(g, k);
 
   [[maybe_unused]] bool found_match = false;
@@ -898,6 +934,14 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::count
   CG const& g, Key const& k, KeyEqual key_equal) noexcept
 {
   std::size_t count = 0;
+
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(k)) {
+    if constexpr (is_outer) {
+      if (g.thread_rank() == 0) { count++; }
+    }
+    return count;
+  }
+
   auto current_slot = initial_slot(g, k);
 
   [[maybe_unused]] bool found_match = false;
@@ -936,8 +980,16 @@ __device__ std::enable_if_t<uses_vector_load, std::size_t>
 static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::pair_count_impl(
   CG const& g, value_type const& pair, PairEqual pair_equal) noexcept
 {
-  std::size_t count = 0;
   auto key          = pair.first;
+  std::size_t count = 0;
+
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(key)) {
+    if constexpr (is_outer) {
+      if (g.thread_rank() == 0) { count++; }
+    }
+    return count;
+  }
+
   auto current_slot = initial_slot(g, key);
 
   [[maybe_unused]] bool found_match = false;
@@ -981,8 +1033,16 @@ __device__ std::enable_if_t<not uses_vector_load, std::size_t>
 static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::pair_count_impl(
   CG const& g, value_type const& pair, PairEqual pair_equal) noexcept
 {
-  std::size_t count = 0;
   auto key          = pair.first;
+  std::size_t count = 0;
+
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(key)) {
+    if constexpr (is_outer) {
+      if (g.thread_rank() == 0) { count++; }
+    }
+    return count;
+  }
+
   auto current_slot = initial_slot(g, key);
 
   [[maybe_unused]] bool found_match = false;
@@ -1035,11 +1095,22 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::retri
   OutputIt output_begin,
   KeyEqual key_equal) noexcept
 {
+  bool running              = true;
   const uint32_t cg_lane_id = g.thread_rank();
 
-  auto current_slot = initial_slot(g, k);
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(k)) {
+    running = false;
+    if constexpr (is_outer) {
+      if (cg_lane_id == 0) {
+        auto output_idx = atomicAdd(warp_counter, 1);
+        Key key         = k;
+        output_buffer[output_idx] =
+          cuco::make_pair<Key, Value>(std::move(key), std::move(this->get_empty_value_sentinel()));
+      }
+    }
+  }
 
-  bool running                      = true;
+  auto current_slot                 = initial_slot(g, k);
   [[maybe_unused]] bool found_match = false;
 
   while (warp.any(running)) {
@@ -1127,11 +1198,23 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::retri
   OutputIt output_begin,
   KeyEqual key_equal) noexcept
 {
+  bool running           = true;
   const uint32_t lane_id = g.thread_rank();
 
-  auto current_slot = initial_slot(g, k);
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(k)) {
+    running = false;
+    if constexpr (is_outer) {
+      if (lane_id == 0) {
+        auto output_idx = (*cg_counter)++;
+        ;
+        Key key = k;
+        output_buffer[output_idx] =
+          cuco::make_pair<Key, Value>(std::move(key), std::move(this->get_empty_value_sentinel()));
+      }
+    }
+  }
 
-  bool running                      = true;
+  auto current_slot                 = initial_slot(g, k);
   [[maybe_unused]] bool found_match = false;
 
   while (running) {
@@ -1209,12 +1292,23 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::pair_
   OutputZipIt2 contained_output_begin,
   PairEqual pair_equal) noexcept
 {
+  bool running              = true;
   const uint32_t cg_lane_id = g.thread_rank();
+  auto key                  = pair.first;
 
-  auto key          = pair.first;
-  auto current_slot = initial_slot(g, key);
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(key)) {
+    running = false;
+    if constexpr (is_outer) {
+      if (cg_lane_id == 0) {
+        auto output_idx                     = atomicAdd(warp_counter, 1);
+        probe_output_buffer[output_idx]     = pair;
+        contained_output_buffer[output_idx] = cuco::make_pair<Key, Value>(
+          std::move(this->get_empty_key_sentinel()), std::move(this->get_empty_value_sentinel()));
+      }
+    }
+  }
 
-  bool running                      = true;
+  auto current_slot                 = initial_slot(g, key);
   [[maybe_unused]] bool found_match = false;
 
   while (warp.any(running)) {
@@ -1310,12 +1404,23 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::pair_
   OutputZipIt2 contained_output_begin,
   PairEqual pair_equal) noexcept
 {
+  bool running           = true;
   const uint32_t lane_id = g.thread_rank();
+  auto key               = pair.first;
 
-  auto key          = pair.first;
-  auto current_slot = initial_slot(g, key);
+  if (this->get_filter().get_num_bits() != 0 and not this->get_filter().contains(key)) {
+    running = false;
+    if constexpr (is_outer) {
+      if (lane_id == 0) {
+        auto output_idx                     = (*cg_counter)++;
+        probe_output_buffer[output_idx]     = pair;
+        contained_output_buffer[output_idx] = cuco::make_pair<Key, Value>(
+          std::move(this->get_empty_key_sentinel()), std::move(this->get_empty_value_sentinel()));
+      }
+    }
+  }
 
-  bool running                      = true;
+  auto current_slot                 = initial_slot(g, key);
   [[maybe_unused]] bool found_match = false;
 
   while (running) {
@@ -1451,6 +1556,8 @@ static_multimap<Key, Value, Scope, ProbeSequence, Allocator>::device_view::flush
     thrust::get<1>(*(contained_output_begin + offset + index)) = contained_pair.second;
   }
 }
+
+// Public device API
 
 template <typename Key,
           typename Value,

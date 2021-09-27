@@ -23,6 +23,7 @@
 #include <memory>
 
 #include <cuco/allocator.hpp>
+#include <cuco/bloom_filter.cuh>
 #include <cuco/traits.hpp>
 
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 11000) && defined(__CUDA_ARCH__) && \
@@ -45,6 +46,19 @@
 #include <cuco/detail/static_multimap_kernels.cuh>
 
 namespace cuco {
+struct filter_tag {
+  std::size_t filter_size_mb{};
+  float cache_hit_ratio{};
+  std::size_t num_hashes{};
+
+  bool operator==(filter_tag const& o) const noexcept
+  {
+    return (filter_size_mb == o.filter_size_mb and cache_hit_ratio == o.cache_hit_ratio and
+            num_hashes == o.num_hashes);
+  }
+
+  bool operator!=(filter_tag const& o) const noexcept { return not(*this == o); }
+};
 
 /**
  * @brief A GPU-accelerated, unordered, associative container of key-value
@@ -153,10 +167,12 @@ class static_multimap {
   using pair_atomic_type   = cuco::pair_type<atomic_key_type, atomic_mapped_type>;
   using atomic_ctr_type    = cuda::atomic<std::size_t, Scope>;
   using allocator_type     = Allocator;
+  using filter_type        = cuco::bloom_filter<Key, Scope, Allocator>;
   using slot_allocator_type =
     typename std::allocator_traits<Allocator>::rebind_alloc<pair_atomic_type>;
   using counter_allocator_type =
     typename std::allocator_traits<Allocator>::rebind_alloc<atomic_ctr_type>;
+  // using filter_type = cuco::cached_bloom_filter<Key, Scope, Allocator>;
 
   static_multimap(static_multimap const&) = delete;
   static_multimap& operator=(static_multimap const&) = delete;
@@ -215,7 +231,8 @@ class static_multimap {
                   Key empty_key_sentinel,
                   Value empty_value_sentinel,
                   cudaStream_t stream    = 0,
-                  Allocator const& alloc = Allocator{});
+                  Allocator const& alloc = Allocator{},
+                  filter_tag tag         = filter_tag{40, 0.6, 1});
 
   /**
    * @brief Inserts all key/value pairs in the range `[first, last)`.
@@ -733,7 +750,12 @@ class static_multimap {
     using mapped_type    = typename device_view_base::mapped_type;
     using iterator       = typename device_view_base::iterator;
     using const_iterator = typename device_view_base::const_iterator;
+    using filter_type    = typename filter_type::device_mutable_view;
 
+   private:
+    filter_type filter_;
+
+   public:
     /**
      * @brief Construct a mutable view of the first `capacity` slots of the
      * slots array pointed to by `slots`.
@@ -748,12 +770,14 @@ class static_multimap {
     __host__ __device__ device_mutable_view(pair_atomic_type* slots,
                                             std::size_t capacity,
                                             Key empty_key_sentinel,
-                                            Value empty_value_sentinel) noexcept
-      : device_view_base{slots, capacity, empty_key_sentinel, empty_value_sentinel}
+                                            Value empty_value_sentinel,
+                                            filter_type filter) noexcept
+      : device_view_base{slots, capacity, empty_key_sentinel, empty_value_sentinel}, filter_{filter}
     {
     }
 
-   private:
+    __host__ __device__ filter_type get_filter() noexcept { return filter_; }
+
     /**
      * @brief Enumeration of the possible results of attempting to insert into a hash bucket.
      */
@@ -853,7 +877,12 @@ class static_multimap {
     using mapped_type    = typename device_view_base::mapped_type;
     using iterator       = typename device_view_base::iterator;
     using const_iterator = typename device_view_base::const_iterator;
+    using filter_type    = typename filter_type::device_view;
 
+   private:
+    filter_type filter_;
+
+   public:
     /**
      * @brief Construct a view of the first `capacity` slots of the
      * slots array pointed to by `slots`.
@@ -868,10 +897,13 @@ class static_multimap {
     __host__ __device__ device_view(pair_atomic_type* slots,
                                     std::size_t capacity,
                                     Key empty_key_sentinel,
-                                    Value empty_value_sentinel) noexcept
-      : device_view_base{slots, capacity, empty_key_sentinel, empty_value_sentinel}
+                                    Value empty_value_sentinel,
+                                    filter_type filter) noexcept
+      : device_view_base{slots, capacity, empty_key_sentinel, empty_value_sentinel}, filter_{filter}
     {
     }
+
+    __host__ __device__ filter_type get_filter() const noexcept { return filter_; }
 
     /**
      * @brief Makes a copy of given `device_view` using non-owned memory.
@@ -941,7 +973,8 @@ class static_multimap {
       return device_view(memory_to_use,
                          source_device_view.get_capacity(),
                          source_device_view.get_empty_key_sentinel(),
-                         source_device_view.get_empty_value_sentinel());
+                         source_device_view.get_empty_value_sentinel(),
+                         source_device_view.get_filter());
     }
 
    private:
@@ -1754,7 +1787,11 @@ class static_multimap {
    */
   device_view get_device_view() const noexcept
   {
-    return device_view(slots_.get(), capacity_, empty_key_sentinel_, empty_value_sentinel_);
+    return device_view(slots_.get(),
+                       capacity_,
+                       empty_key_sentinel_,
+                       empty_value_sentinel_,
+                       filter_.get_device_view());
   }
 
   /**
@@ -1765,7 +1802,11 @@ class static_multimap {
    */
   device_mutable_view get_device_mutable_view() const noexcept
   {
-    return device_mutable_view(slots_.get(), capacity_, empty_key_sentinel_, empty_value_sentinel_);
+    return device_mutable_view(slots_.get(),
+                               capacity_,
+                               empty_key_sentinel_,
+                               empty_value_sentinel_,
+                               filter_.get_device_mutable_view());
   }
 
  private:
@@ -1780,7 +1821,8 @@ class static_multimap {
   slot_deleter delete_slots_;                   ///< Custom slots deleter
   std::unique_ptr<atomic_ctr_type, counter_deleter> d_counter_{};  ///< Preallocated device counter
   std::unique_ptr<pair_atomic_type, slot_deleter> slots_{};  ///< Pointer to flat slots storage
-};                                                           // class static_multimap
+  filter_type filter_{};  ///< Bloom filter used for pre-filtering unsuccessful queries
+};                        // class static_multimap
 
 }  // namespace cuco
 
