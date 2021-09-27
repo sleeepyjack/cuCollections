@@ -18,26 +18,41 @@
 
 #include <cooperative_groups.h>
 #include <thrust/distance.h>
+#include <thrust/execution_policy.h>
 #include <thrust/functional.h>
+#include <thrust/reduce.h>
 #include <cub/cub.cuh>
 #include <cuda/std/atomic>
 #include <memory>
 
 #include <cuco/allocator.hpp>
+#include <cuco/detail/util.hpp>
 
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 11000) && defined(__CUDA_ARCH__) && \
   (__CUDA_ARCH__ >= 700)
 #define CUCO_HAS_CUDA_BARRIER
 #endif
 
+// cg::memcpy_aysnc is supported for CUDA 11.1 and up
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11100)
+#define CUCO_HAS_CG_MEMCPY_ASYNC
+#endif
+
 #if defined(CUCO_HAS_CUDA_BARRIER)
 #include <cuda/barrier>
 #endif
 
-#include <cuco/detail/bloom_filter_kernels.cuh>
+// interleaved L2 access properties are supported for CUDA 11.4.2 and up
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11040) && defined(__CUDA_ARCH__) && \
+  (__CUDA_ARCH__ >= 800)
+#define CUCO_HAS_L2_RESIDENCY_CONTROL
+#endif
+
 #include <cuco/detail/error.hpp>
-#include <cuco/detail/hash_functions.cuh>
 #include <cuco/detail/util.hpp>
+
+#include <cuco/detail/bloom_filter_kernels.cuh>
+#include <cuco/detail/hash_functions.cuh>
 
 namespace cuco {
 
@@ -79,52 +94,55 @@ namespace cuco {
  * @tparam Scope The scope in which insert/find operations will be performed by
  * individual threads.
  * @tparam Allocator Type of allocator used for device storage
- * @tparam Slot Type of bloom filter partition
  */
 template <typename Key,
           cuda::thread_scope Scope = cuda::thread_scope_device,
-          typename Allocator       = cuco::cuda_allocator<char>,
-          typename Slot            = std::uint64_t>
+          typename Allocator       = cuco::cuda_allocator<char>>
 class bloom_filter {
  public:
   using key_type         = Key;
-  using slot_type        = Slot;
+  using slot_type        = std::uint64_t;
   using atomic_slot_type = cuda::atomic<slot_type, Scope>;
   using iterator         = atomic_slot_type*;
   using const_iterator   = atomic_slot_type const*;
-  using atomic_ctr_type  = cuda::atomic<std::size_t, Scope>;
   using allocator_type   = Allocator;
+
   using slot_allocator_type =
     typename std::allocator_traits<Allocator>::rebind_alloc<atomic_slot_type>;
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
-  static_assert(atomic_slot_type::is_always_lock_free,
-                "A slot type larger than 8B is supported for only sm_70 and up.");
-#endif
+  static_assert(std::is_same_v<slot_type, std::uint64_t>,
+                "The filter's slot type is restricted to uint64_t.");
 
   bloom_filter(bloom_filter const&) = delete;
-  bloom_filter(bloom_filter&&)      = delete;
   bloom_filter& operator=(bloom_filter const&) = delete;
-  bloom_filter& operator=(bloom_filter&&) = delete;
+
+  bloom_filter(bloom_filter&&) = default;
+  bloom_filter& operator=(bloom_filter&&) = default;
+  ~bloom_filter()                         = default;
 
   /**
-   * @brief Construct a fixed-size filter with the specified number of bits.
+   * @brief Default constructor.
+   *
+   */
+  bloom_filter();
+
+  /**
+   * @brief Constructs a fixed-size filter with the specified number of bits.
    *
    * @param num_bits The total number of bits in the filter
    * @param num_hashes The number of hashes to be applied to a key
+   * @param stream CUDA stream used to (de-)initialize the filter
    * @param alloc Allocator used for allocating device storage
    */
-  bloom_filter(std::size_t num_bits, std::size_t num_hashes, Allocator const& alloc = Allocator{});
-
-  /**
-   * @brief Destroys the filter and frees its contents.
-   *
-   */
-  ~bloom_filter();
+  bloom_filter(std::size_t num_bits,
+               std::size_t num_hashes,
+               cudaStream_t stream    = 0,
+               Allocator const& alloc = Allocator{},
+               float cache_hit_ratio  = 0.0f);
 
   /**
    * @brief (Re-) initializes the filter, i.e., set all bits to 0.
-   *
+   * @param stream CUDA stream used to (de-)initialize the filter
    */
   void initialize(cudaStream_t stream = 0);
 
@@ -175,14 +193,14 @@ class bloom_filter {
    *
    * @return Slots array
    */
-  iterator get_slots() noexcept { return slots_; }
+  iterator get_slots() noexcept { return slots_.get(); }
 
   /**
    * @brief Gets slots array.
    *
    * @return Slots array
    */
-  const_iterator get_slots() const noexcept { return slots_; }
+  const_iterator get_slots() const noexcept { return slots_.get(); }
 
   /**
    * @brief Gets the total number of bits in the filter (rounded up to the
@@ -206,30 +224,95 @@ class bloom_filter {
    */
   std::size_t get_num_hashes() const noexcept { return num_hashes_; }
 
+  /**
+   * @brief Gets the fraction of resident L2 cache lines of the filter.
+   *
+   * @return The cache hit ratio.
+   */
+  float get_cache_hit_ratio() const noexcept { return cache_hit_ratio_; }
+
+  /**
+   * @brief Gets the load factor of the filter.
+   *
+   * @param stream The CUDA stream this operation is executed in
+   *
+   * @return The load factor of the filter
+   */
+  float get_load_factor(cudaStream_t stream = 0) const noexcept
+  {
+    return 0.0f;
+    // TODO
+    // auto popcnt_iter = thrust::make_transform_iterator(slots_, [] __device__(auto i) {
+    //   return static_cast<float>(__popcll(i));
+    // });  // TODO fix popcount
+    // return thrust::reduce(thrust::cuda::par.on(stream), popcnt_iter, popcnt_iter + num_slots_) /
+    //        num_bits_;
+  }
+
  private:
+  /**
+   * @brief Custom deleter for unique pointer of slots.
+   */
+  struct slot_deleter {
+    slot_deleter(slot_allocator_type& a, size_t& n, cudaStream_t& s, float& c)
+      : allocator{a}, num_slots{n}, stream{s}, cache_hit_ratio{c}
+    {
+    }
+
+    slot_deleter(slot_deleter const&) = default;
+
+    void operator()(iterator ptr)
+    {
+#if defined(CUCO_HAS_L2_RESIDENCY_CONTROL)
+      if (cache_hit_ratio != 0.0) cudaCtxResetPersistingL2Cache();
+#endif
+
+      allocator.deallocate(ptr, num_slots, stream);
+    }
+
+    slot_deleter& operator=(slot_deleter&& other)
+    {
+      if (this != &other) {
+        allocator       = other.allocator;
+        num_slots       = other.num_slots;
+        stream          = other.stream;
+        cache_hit_ratio = other.cache_hit_ratio;
+      }
+      return *this;
+    }
+
+    slot_allocator_type& allocator;
+    std::size_t& num_slots;
+    cudaStream_t& stream;
+    float& cache_hit_ratio;
+  };
+
   class device_view_base {
    protected:
     // Import member type definitions from `bloom_filter`
-    using key_type         = Key;
+    using key_type         = key_type;
     using slot_type        = slot_type;
     using atomic_slot_type = atomic_slot_type;
-    using iterator         = atomic_slot_type*;
-    using const_iterator   = atomic_slot_type const*;
+    using iterator         = iterator;
+    using const_iterator   = const_iterator;
 
    private:
-    atomic_slot_type* slots_{};  ///< Pointer to flat slots storage
-    std::size_t num_bits_{};     ///< Total number of bits
-    std::size_t num_slots_{};    ///< Total number of slots
-    std::size_t num_hashes_{};   ///< Number of hashes to apply
+    iterator slots_{};          ///< Pointer to flat slots storage
+    std::size_t num_bits_{};    ///< Total number of bits
+    std::size_t num_slots_{};   ///< Total number of slots
+    std::size_t num_hashes_{};  ///< Number of hashes to apply
+    float cache_hit_ratio_{};
 
    protected:
-    __host__ __device__ device_view_base(atomic_slot_type* slots,
+    __host__ __device__ device_view_base(iterator slots,
                                          std::size_t num_bits,
-                                         std::size_t num_hashes) noexcept
+                                         std::size_t num_hashes,
+                                         float cache_hit_ratio) noexcept
       : slots_{slots},
         num_bits_{SDIV(num_bits, detail::type_bits<slot_type>()) * detail::type_bits<slot_type>()},
         num_slots_{SDIV(num_bits, detail::type_bits<slot_type>())},
-        num_hashes_{num_hashes}
+        num_hashes_{num_hashes},
+        cache_hit_ratio_{cache_hit_ratio}
     {
     }
 
@@ -270,7 +353,7 @@ class bloom_filter {
      * @return Bit pattern for key `k`
      */
     template <typename Hash>
-    __device__ slot_type key_pattern(Key const& k, Hash hash) const noexcept;
+    __device__ auto key_pattern(Key const& k, Hash hash) const noexcept;
 
     /**
      * @brief Initializes the given array of slots using the threads in the group `g`.
@@ -283,12 +366,12 @@ class bloom_filter {
      * @param num_slots Number of slots to initialize
      */
     template <typename CG>
-    __device__ static void initialize_slots(CG g, atomic_slot_type* slots, std::size_t num_bits)
+    __device__ static void initialize_slots(CG g, iterator slots, std::size_t num_bits)
     {
-      auto num_slots = SDIV(num_bits, detail::type_bits<slot_type>());
-      auto tid       = g.thread_rank();
+      auto const num_slots = SDIV(num_bits, detail::type_bits<slot_type>());
+      auto tid             = g.thread_rank();
       while (tid < num_slots) {
-        new (&slots[tid]) atomic_slot_type{0};
+        slots[tid] = 0;
         tid += g.size();
       }
       g.sync();
@@ -332,44 +415,11 @@ class bloom_filter {
     __host__ __device__ std::size_t get_num_hashes() const noexcept { return num_hashes_; }
 
     /**
-     * @brief Returns iterator to the first slot.
+     * @brief Gets the fraction of resident L2 cache lines of the filter.
      *
-     * @note Unlike `std::map::begin()`, the `begin_slot()` iterator does _not_ point to the first
-     * occupied slot. Instead, it refers to the first slot in the array of contiguous slot storage.
-     * Iterating from `begin_slot()` to `end_slot()` will iterate over all slots.
-     *
-     * There is no `begin()` iterator to avoid confusion.
-     *
-     * @return Iterator to the first slot
+     * @return The cache hit ratio.
      */
-    __device__ iterator begin_slot() noexcept { return slots_; }
-
-    /**
-     * @brief Returns iterator to the first slot.
-     *
-     * @note Unlike `std::map::begin()`, the `begin_slot()` iterator does _not_ point to the first
-     * occupied slot. Instead, it refers to the first slot in the array of contiguous slot storage.
-     * Iterating from `begin_slot()` to `end_slot()` will iterate over all slots.
-     *
-     * There is no `begin()` iterator to avoid confusion.
-     *
-     * @return Iterator to the first slot
-     */
-    __device__ const_iterator begin_slot() const noexcept { return slots_; }
-
-    /**
-     * @brief Returns a const_iterator to one past the last slot.
-     *
-     * @return A const_iterator to one past the last slot
-     */
-    __host__ __device__ const_iterator end_slot() const noexcept { return slots_ + num_slots_; }
-
-    /**
-     * @brief Returns an iterator to one past the last slot.
-     *
-     * @return An iterator to one past the last slot
-     */
-    __host__ __device__ iterator end_slot() noexcept { return slots_ + num_slots_; }
+    __host__ __device__ float get_cache_hit_ratio() const noexcept { return cache_hit_ratio_; }
   };
 
  public:
@@ -396,11 +446,11 @@ class bloom_filter {
   class device_mutable_view : public device_view_base {
    public:
     // Import member type definitions from `bloom_filter`
-    using key_type         = Key;
+    using key_type         = key_type;
     using slot_type        = slot_type;
     using atomic_slot_type = atomic_slot_type;
-    using iterator         = atomic_slot_type*;
-    using const_iterator   = atomic_slot_type const*;
+    using iterator         = iterator;
+    using const_iterator   = const_iterator;
 
     /**
      * @brief Construct a mutable view of the array pointed to by `slots`.
@@ -409,10 +459,11 @@ class bloom_filter {
      * @param num_bits The total number of bits in the filter
      * @param num_hashes The number of hashes to be applied to a key
      */
-    __host__ __device__ device_mutable_view(atomic_slot_type* slots,
+    __host__ __device__ device_mutable_view(iterator slots,
                                             std::size_t num_bits,
-                                            std::size_t num_hashes) noexcept
-      : device_view_base{slots, num_bits, num_hashes}
+                                            std::size_t num_hashes,
+                                            float cache_hit_ratio) noexcept
+      : device_view_base{slots, num_bits, num_hashes, cache_hit_ratio}
     {
     }
 
@@ -431,8 +482,8 @@ class bloom_filter {
     __device__ static device_mutable_view make_from_uninitialized_slots(
       CG g, void* const slots, std::size_t num_bits, std::size_t num_hashes) noexcept
     {
-      device_view_base::initialize_slots(g, reinterpret_cast<atomic_slot_type*>(slots), num_bits);
-      return device_mutable_view{reinterpret_cast<atomic_slot_type*>(slots), num_bits, num_hashes};
+      device_view_base::initialize_slots(g, reinterpret_cast<iterator>(slots), num_bits);
+      return device_mutable_view{reinterpret_cast<iterator>(slots), num_bits, num_hashes, 0.0};
     }
 
     /**
@@ -462,11 +513,11 @@ class bloom_filter {
   class device_view : public device_view_base {
    public:
     // Import member type definitions from `bloom_filter`
-    using key_type         = Key;
+    using key_type         = key_type;
     using slot_type        = slot_type;
     using atomic_slot_type = atomic_slot_type;
-    using iterator         = atomic_slot_type*;
-    using const_iterator   = atomic_slot_type const*;
+    using iterator         = iterator;
+    using const_iterator   = const_iterator;
 
     /**
      * @brief Construct a mutable view of the array pointed to by `slots`.
@@ -475,10 +526,11 @@ class bloom_filter {
      * @param num_bits The total number of bits in the filter
      * @param num_hashes The number of hashes to be applied to a key
      */
-    __host__ __device__ device_view(atomic_slot_type* slots,
+    __host__ __device__ device_view(iterator slots,
                                     std::size_t num_bits,
-                                    std::size_t num_hashes) noexcept
-      : device_view_base{slots, num_bits, num_hashes}
+                                    std::size_t num_hashes,
+                                    float cache_hit_ratio) noexcept
+      : device_view_base{slots, num_bits, num_hashes, cache_hit_ratio}
     {
     }
 
@@ -490,7 +542,8 @@ class bloom_filter {
     __host__ __device__ explicit device_view(device_mutable_view mutable_filter)
       : device_view_base{mutable_filter.get_slots(),
                          mutable_filter.get_num_bits(),
-                         mutable_filter.get_num_hashes()}
+                         mutable_filter.get_num_hashes(),
+                         mutable_filter.get_cache_hit_ratio()}
     {
     }
 
@@ -514,11 +567,11 @@ class bloom_filter {
      */
     template <typename CG>
     __device__ static device_view make_copy(CG g,
-                                            void* const memory_to_use,
+                                            iterator memory_to_use,
                                             device_view source_device_view) noexcept
     {
-      atomic_slot_type* const dest_slots      = reinterpret_cast<atomic_slot_type*>(memory_to_use);
-      atomic_slot_type const* const src_slots = source_device_view.get_slots();
+      iterator const dest_slots      = memory_to_use;
+      const_iterator const src_slots = source_device_view.get_slots();
 
 #if defined(CUDA_HAS_CUDA_BARRIER)
       __shared__ cuda::barrier<cuda::thread_scope::thread_scope_block> barrier;
@@ -540,7 +593,7 @@ class bloom_filter {
 #endif
 
       return device_view(
-        dest_slots, source_device_view.get_num_bits(), source_device_view.get_num_hashes());
+        dest_slots, source_device_view.get_num_bits(), source_device_view.get_num_hashes(), 0.0);
     }
 
     /**
@@ -566,7 +619,7 @@ class bloom_filter {
    */
   device_view get_device_view() const noexcept
   {
-    return device_view(slots_, num_bits_, num_hashes_);
+    return device_view(slots_.get(), num_bits_, num_hashes_, cache_hit_ratio_);
   }
 
   /**
@@ -577,16 +630,21 @@ class bloom_filter {
    */
   device_mutable_view get_device_mutable_view() const noexcept
   {
-    return device_mutable_view(slots_, num_bits_, num_hashes_);
+    return device_mutable_view(slots_.get(), num_bits_, num_hashes_, cache_hit_ratio_);
   }
 
  private:
-  atomic_slot_type* slots_{nullptr};      ///< Pointer to flat slot storage
-  std::size_t num_bits_{};                ///< Total number of bits in the filter
-  std::size_t num_slots_{};               ///< Total number of slots in the filter
-  std::size_t num_hashes_{};              ///< Number of hash functions to apply (k)
-  slot_allocator_type slot_allocator_{};  ///< Allocator used to allocate slots
-};
+  std::size_t num_bits_{};    ///< Total number of bits in the filter
+  std::size_t num_slots_{};   ///< Total number of slots in the filter
+  std::size_t num_hashes_{};  ///< Number of hash functions to apply (k)
+  float cache_hit_ratio_{};
+  cudaStream_t stream_{};                                    ///< CUDA stream used for ctor/dtor
+  slot_allocator_type slot_allocator_{};                     ///< Allocator used to allocate slots
+  slot_deleter slot_deleter_{};                              ///< Custom slots deleter
+  std::unique_ptr<atomic_slot_type, slot_deleter> slots_{};  ///< Pointer to flat slot storage
+
+};  // namespace cuco
+
 }  // namespace cuco
 
 #include <cuco/detail/bloom_filter.inl>

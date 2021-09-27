@@ -26,10 +26,13 @@ namespace cg = cooperative_groups;
  * @param slots Pointer to flat `slot` storage
  * @param num_slots Size of the storage pointed to by `slots`
  */
-template <std::size_t block_size, typename atomic_slot_type>
-__global__ void initialize(atomic_slot_type* const slots, std::size_t num_slots)
+template <std::size_t block_size, typename View>
+__global__ void initialize(View view, float cache_hit_ratio)
 {
-  for (std::size_t tid = block_size * blockIdx.x + threadIdx.x; tid < num_slots;
+  auto slots             = view.get_slots();
+  using atomic_slot_type = typename View::atomic_slot_type;
+
+  for (std::size_t tid = block_size * blockIdx.x + threadIdx.x; tid < view.get_num_slots();
        tid += gridDim.x * block_size) {
     new (&slots[tid]) atomic_slot_type{0};
   }

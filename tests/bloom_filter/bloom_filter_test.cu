@@ -25,8 +25,7 @@ __global__ void shared_memory_filter_kernel(bool* key_found)
 {
   namespace cg = cooperative_groups;
 
-  using filter_type =
-    cuco::bloom_filter<Key, cuda::thread_scope_block, cuco::cuda_allocator<char>, Slot>;
+  using filter_type = cuco::bloom_filter<Key, cuda::thread_scope_block, cuco::cuda_allocator<char>>;
   using mutable_view_type = typename filter_type::device_mutable_view;
   using view_type         = typename filter_type::device_view;
 
@@ -53,17 +52,16 @@ TEMPLATE_TEST_CASE_SIG("Unit tests for cuco::bloom_filter.",
                        (int64_t, int64_t))
 {
   using filter_type =
-    cuco::bloom_filter<Key, cuda::thread_scope_device, cuco::cuda_allocator<char>, Slot>;
+    cuco::bloom_filter<Key, cuda::thread_scope_device, cuco::cuda_allocator<char>>;
 
   SECTION("Edge cases during object construction.")
   {
-    SECTION(
-      "The ctor should allocate at least a single slot independent of the value given by num_bits.")
+    SECTION("A default-constructed filter should not have any slots.")
     {
-      filter_type filter{0, 1};
+      filter_type filter{};
 
-      REQUIRE(filter.get_num_slots() == 1);
-      REQUIRE(filter.get_num_bits() == sizeof(Slot) * CHAR_BIT);
+      REQUIRE(filter.get_num_slots() == 0);
+      REQUIRE(filter.get_num_bits() == 0);
     }
 
     SECTION("The number of hash function to apply should always be in range [1, slot bits].")

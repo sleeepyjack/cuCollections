@@ -36,6 +36,8 @@ struct MurmurHash3_32 {
 
   __host__ __device__ constexpr MurmurHash3_32() : m_seed(0) {}
 
+  __host__ __device__ constexpr MurmurHash3_32(uint32_t seed) : m_seed(seed) {}
+
   constexpr result_type __host__ __device__ operator()(Key const& key) const noexcept
   {
     constexpr int len         = sizeof(argument_type);
