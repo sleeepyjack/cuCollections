@@ -32,7 +32,6 @@ NVBENCH_DECLARE_ENUM_TYPE_STRINGS(
   [](dist_type d) {
     switch (d) {
       case dist_type::GAUSSIAN: return "GAUSSIAN";
-      case dist_type::GEOMETRIC: return "GEOMETRIC";
       case dist_type::UNIFORM: return "UNIFORM";
       default: return "ERROR";
     }
@@ -65,17 +64,6 @@ static void generate_keys(OutputIt output_begin, OutputIt output_end)
           k = distribution(gen);
         }
         output_begin[i] = k;
-      }
-      break;
-    }
-    case dist_type::GEOMETRIC: {
-      auto const max   = std::numeric_limits<int32_t>::max();
-      auto const coeff = static_cast<double>(num_keys) / static_cast<double>(max);
-      // Random sampling in range [0, INT32_MAX]
-      std::geometric_distribution<Key> distribution{1e-9};
-
-      for (auto i = 0; i < num_keys; ++i) {
-        output_begin[i] = distribution(gen) * coeff;
       }
       break;
     }

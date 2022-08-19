@@ -75,8 +75,7 @@ std::enable_if_t<(sizeof(Key) != sizeof(Value)), void> nvbench_static_multimap_i
 
 using key_type   = nvbench::type_list<nvbench::int32_t, nvbench::int64_t>;
 using value_type = nvbench::type_list<nvbench::int32_t, nvbench::int64_t>;
-using d_type =
-  nvbench::enum_type_list<dist_type::GAUSSIAN, dist_type::GEOMETRIC, dist_type::UNIFORM>;
+using d_type     = nvbench::enum_type_list<dist_type::GAUSSIAN, dist_type::UNIFORM>;
 
 using multiplicity = nvbench::enum_type_list<1, 2, 4, 8, 16, 32, 64, 128, 256>;
 
