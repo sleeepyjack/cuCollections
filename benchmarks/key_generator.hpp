@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, NVIDIA CORPORATION.
+ * Copyright (c) 2022, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,87 +16,235 @@
 
 #pragma once
 
-#include <nvbench/nvbench.cuh>
-
+#include <algorithm>
+#include <iterator>
 #include <limits>
-#include <random>
+#include <time.h>
 
-enum class dist_type { GAUSSIAN, GEOMETRIC, UNIFORM };
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/random.h>
+#include <thrust/sequence.h>
+#include <thrust/shuffle.h>
+#include <thrust/transform.h>
 
+enum class dist_type { UNIQUE, GAUSSIAN, UNIFORM };
+
+#if defined(NVBENCH_DECLARE_ENUM_TYPE_STRINGS)
 NVBENCH_DECLARE_ENUM_TYPE_STRINGS(
-  // Enum type:
   dist_type,
-  // Callable to generate input strings:
-  // Short identifier used for tables, command-line args, etc.
-  // Used when context is available to figure out the enum type.
   [](dist_type d) {
     switch (d) {
+      case dist_type::UNIQUE: return "UNIQUE";
       case dist_type::GAUSSIAN: return "GAUSSIAN";
       case dist_type::UNIFORM: return "UNIFORM";
       default: return "ERROR";
     }
   },
-  // Callable to generate descriptions:
-  // If non-empty, these are used in `--list` to describe values.
-  // Used when context may not be available to figure out the type from the
-  // input string.
-  // Just use `[](auto) { return std::string{}; }` if you don't want these.
-  [](auto) { return std::string{}; })
+  [](auto) { return std::string{}; });
+#endif
 
-template <dist_type Dist, std::size_t Multiplicity, typename Key, typename OutputIt>
-static void generate_keys(OutputIt output_begin, OutputIt output_end)
-{
-  auto const num_keys = std::distance(output_begin, output_end);
+template <typename RNG>
+class key_generator_base {
+ public:
+  /**
+   * @brief Construct a new key generator object.
+   *
+   * @param seed Seed for the random number generator
+   */
+  key_generator_base(uint32_t seed = static_cast<uint32_t>(time(nullptr))) : rng_(seed) {}
 
-  std::random_device rd;
-  std::mt19937 gen{rd()};
+  /**
+   * @brief Randomly replaces previously generated keys with new keys outside the input
+   * distribution.
+   *
+   * @tparam ExecPolicy Thrust execution policy
+   * @tparam InOutIt Input/Ouput iterator typy which value type is the desired key type
+   *
+   * @param exec_policy Thrust execution policy this operation will be executed with
+   * @param begin Start of the key sequence
+   * @param end End of the key sequence
+   * @param keep_prob Probability that a key is kept
+   */
+  template <typename ExecPolicy, typename InOutIt>
+  void dropout(ExecPolicy exec_policy, InOutIt begin, InOutIt end, double keep_prob)
+  {
+    using value_type = typename std::iterator_traits<InOutIt>::value_type;
+    size_t num_keys  = thrust::distance(begin, end);
 
-  switch (Dist) {
-    case dist_type::GAUSSIAN: {
-      auto const mean = static_cast<double>(num_keys / 2);
-      auto const dev  = static_cast<double>(num_keys / 5);
+    thrust::counting_iterator<size_t> seq(rng_());
 
-      std::normal_distribution<> distribution{mean, dev};
-
-      for (auto i = 0; i < num_keys; ++i) {
-        auto k = distribution(gen);
-        while (k >= num_keys) {
-          k = distribution(gen);
-        }
-        output_begin[i] = k;
-      }
-      break;
-    }
-    case dist_type::UNIFORM: {
-      std::uniform_int_distribution<Key> distribution{1, static_cast<Key>(num_keys / Multiplicity)};
-
-      for (auto i = 0; i < num_keys; ++i) {
-        output_begin[i] = distribution(gen);
-      }
-      break;
-    }
-  }  // switch
-}
-
-template <typename Key, typename OutputIt>
-static void generate_probe_keys(double const matching_rate,
-                                OutputIt output_begin,
-                                OutputIt output_end)
-{
-  auto const num_keys = std::distance(output_begin, output_end);
-  auto const max      = std::numeric_limits<Key>::max();
-
-  std::random_device rd;
-  std::mt19937 gen{rd()};
-
-  std::uniform_real_distribution<double> rate_dist(0.0, 1.0);
-  std::uniform_int_distribution<Key> non_match_dist{static_cast<Key>(num_keys), max};
-
-  for (auto i = 0; i < num_keys; ++i) {
-    auto const tmp_rate = rate_dist(gen);
-
-    if (tmp_rate > matching_rate) { output_begin[i] = non_match_dist(gen); }
+    thrust::transform_if(
+      exec_policy,
+      seq,
+      seq + num_keys,
+      begin,
+      [num_keys] __host__ __device__(size_t const n) {
+        RNG rng;
+        thrust::uniform_int_distribution<value_type> non_match_dist{
+          static_cast<value_type>(num_keys), std::numeric_limits<value_type>::max()};
+        rng.discard(n);
+        return non_match_dist(rng);
+      },
+      [keep_prob] __host__ __device__(size_t const n) {
+        RNG rng;
+        thrust::uniform_real_distribution<double> rate_dist(0.0, 1.0);
+        rng.discard(n);
+        return (rate_dist(rng) > keep_prob);
+      });
+    thrust::shuffle(exec_policy, begin, end, rng_);
   }
 
-  std::random_shuffle(output_begin, output_end);
-}
+ protected:
+  RNG rng_;  ///< Random number generator
+};
+
+/**
+ * @brief Random key generator.
+ *
+ * @tparam Dist Key distribution type
+ * @tparam RNG Pseudo-random number generator
+ */
+template <dist_type Dist, typename RNG = thrust::default_random_engine>
+class key_generator;
+
+template <typename RNG>
+class key_generator<dist_type::UNIQUE, RNG> : public key_generator_base<RNG> {
+ public:
+  /**
+   * @brief Construct a new key generator object.
+   *
+   * @param seed Seed for the random number generator
+   */
+  explicit key_generator(uint32_t seed = static_cast<uint32_t>(time(nullptr)))
+    : key_generator_base<RNG>{seed}
+  {
+  }
+
+  /**
+   * @brief Generates a sequence of random keys in the interval [0, N).
+   *
+   * @tparam ExecPolicy Thrust execution policy
+   * @tparam OutputIt Ouput iterator typy which value type is the desired key type
+   *
+   * @param exec_policy Thrust execution policy this operation will be executed with
+   * @param output_begin Start of the output sequence
+   * @param output_end End of the output sequence
+   */
+  template <typename ExecPolicy, typename OutputIt>
+  void generate(ExecPolicy exec_policy, OutputIt out_begin, OutputIt out_end)
+  {
+    thrust::sequence(exec_policy, out_begin, out_end, 0);
+    thrust::shuffle(exec_policy, out_begin, out_end, this->rng_);
+  }
+};
+
+template <typename RNG>
+class key_generator<dist_type::UNIFORM, RNG> : public key_generator_base<RNG> {
+ public:
+  /**
+   * @brief Construct a new key generator object.
+   *
+   * @param multiplicity Average frequency of each key in the output sequence
+   * @param seed Seed for the random number generator
+   */
+  explicit key_generator(size_t multiplicity = 8,
+                         uint32_t seed       = static_cast<uint32_t>(time(nullptr)))
+    : key_generator_base<RNG>{seed}, multiplicity_{multiplicity}
+  {
+  }
+
+  /**
+   * @brief Generates a sequence of random keys in the interval [0, N).
+   *
+   * @tparam ExecPolicy Thrust execution policy
+   * @tparam OutputIt Ouput iterator typy which value type is the desired key type
+   *
+   * @param exec_policy Thrust execution policy this operation will be executed with
+   * @param output_begin Start of the output sequence
+   * @param output_end End of the output sequence
+   */
+  template <typename ExecPolicy, typename OutputIt>
+  void generate(ExecPolicy exec_policy, OutputIt out_begin, OutputIt out_end)
+  {
+    using value_type = typename std::iterator_traits<OutputIt>::value_type;
+    size_t num_keys  = thrust::distance(out_begin, out_end);
+
+    thrust::counting_iterator<size_t> seq(this->rng_());
+
+    thrust::transform(exec_policy,
+                      seq,
+                      seq + num_keys,
+                      out_begin,
+                      [*this, num_keys] __host__ __device__(size_t const n) {
+                        RNG rng;
+                        thrust::uniform_int_distribution<value_type> dist(0,
+                                                                          num_keys / multiplicity_);
+                        rng.discard(n);
+                        return dist(rng);
+                      });
+  }
+
+ private:
+  size_t multiplicity_;  ///< Average frequency of each key in the output sequence
+};
+
+template <typename RNG>
+class key_generator<dist_type::GAUSSIAN, RNG> : public key_generator_base<RNG> {
+ public:
+  /**
+   * @brief Construct a new key generator object.
+   *
+   * @param deviation Deviation/skew of the gaussian distribution; clamped to the interval [0, 1]
+   * @param seed Seed for the random number generator
+   *
+   * @note `deviation=0` corresponds to a Dirac delta distribution while `deviation=1' corresponds
+   * to a uniform distribution.
+   */
+  explicit key_generator(double deviation = 0.2,
+                         uint32_t seed    = static_cast<uint32_t>(time(nullptr)))
+    : key_generator_base<RNG>{seed}, deviation_{std::clamp(deviation, 0.0, 1.0)}
+  {
+  }
+
+  /**
+   * @brief Generates a sequence of random keys in the interval [0, N).
+   *
+   * @tparam ExecPolicy Thrust execution policy
+   * @tparam OutputIt Ouput iterator typy which value type is the desired key type
+   *
+   * @param exec_policy Thrust execution policy this operation will be executed with
+   * @param output_begin Start of the output sequence
+   * @param output_end End of the output sequence
+   */
+  template <typename ExecPolicy, typename OutputIt>
+  void generate(ExecPolicy exec_policy, OutputIt out_begin, OutputIt out_end)
+  {
+    using value_type = typename std::iterator_traits<OutputIt>::value_type;
+    size_t num_keys  = thrust::distance(out_begin, out_end);
+
+    thrust::counting_iterator<size_t> seq(this->rng_());
+
+    thrust::transform(exec_policy,
+                      seq,
+                      seq + num_keys,
+                      out_begin,
+                      [*this, num_keys] __host__ __device__(size_t const n) {
+                        RNG rng;
+                        thrust::normal_distribution<> dist(static_cast<double>(num_keys / 2),
+                                                           num_keys * deviation_);
+                        rng.discard(n);
+                        auto val = dist(rng);
+                        while (val < 0 or val >= num_keys) {
+                          // Re-sample if the value is outside the range [0, N)
+                          // This is necessary because the normal distribution is not bounded
+                          // might be a better way to do this, e.g., discard(n)
+                          val = dist(rng);
+                        }
+                        return val;
+                      });
+  }
+
+ private:
+  double
+    deviation_;  ///< Deviation/skew of the gaussian distribution; clamped to the interval [0, 1]
+};

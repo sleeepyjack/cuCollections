@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-#include <key_generator.hpp>
-
 #include <cuco/static_multimap.cuh>
 
 #include <nvbench/nvbench.cuh>
+
+#include <key_generator.hpp>
 
 #include <thrust/device_vector.h>
 

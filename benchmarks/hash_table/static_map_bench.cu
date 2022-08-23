@@ -16,49 +16,20 @@
 
 #include <cuco/static_map.cuh>
 
+#include <benchmark/benchmark.h>
+
+#include <key_generator.hpp>
+
 #include <thrust/device_vector.h>
 #include <thrust/for_each.h>
 
-#include <benchmark/benchmark.h>
-
-#include <fstream>
-#include <random>
-
-enum class dist_type { UNIQUE, UNIFORM, GAUSSIAN };
-
-template <dist_type Dist, typename Key, typename OutputIt>
-static void generate_keys(OutputIt output_begin, OutputIt output_end)
-{
-  auto num_keys = std::distance(output_begin, output_end);
-
-  std::random_device rd;
-  std::mt19937 gen{rd()};
-
-  switch (Dist) {
-    case dist_type::UNIQUE:
-      for (auto i = 0; i < num_keys; ++i) {
-        output_begin[i] = i;
-      }
-      break;
-    case dist_type::UNIFORM:
-      for (auto i = 0; i < num_keys; ++i) {
-        output_begin[i] = std::abs(static_cast<Key>(gen()));
-      }
-      break;
-    case dist_type::GAUSSIAN:
-      std::normal_distribution<> dg{1e9, 1e7};
-      for (auto i = 0; i < num_keys; ++i) {
-        output_begin[i] = std::abs(static_cast<Key>(dg(gen)));
-      }
-      break;
-  }
-}
+#include <fstream>  // TODO remove
 
 /**
  * @brief Generates input sizes and hash table occupancies
  *
  */
-static void generate_size_and_occupancy(benchmark::internal::Benchmark* b)
+static void generate_size_and_occupancy(benchmark::internal::Benchmark* b)  // TODO remove
 {
   for (auto size = 100'000'000; size <= 100'000'000; size *= 10) {
     for (auto occupancy = 10; occupancy <= 90; occupancy += 10) {
@@ -72,26 +43,27 @@ static void BM_static_map_insert(::benchmark::State& state)
 {
   using map_type = cuco::static_map<Key, Value>;
 
-  std::size_t num_keys = state.range(0);
-  float occupancy      = state.range(1) / float{100};
-  std::size_t size     = num_keys / occupancy;
+  auto const num_keys   = state.range(0);
+  float const occupancy = state.range(1) / float{100};  // TODO auto?
 
-  std::vector<Key> h_keys(num_keys);
-  std::vector<cuco::pair_type<Key, Value>> h_pairs(num_keys);
+  key_generator<Dist> gen;
 
-  generate_keys<Dist, Key>(h_keys.begin(), h_keys.end());
+  std::size_t const size = num_keys / occupancy;
 
-  for (std::size_t i = 0; i < num_keys; ++i) {
-    Key key           = h_keys[i];
-    Value val         = h_keys[i];
-    h_pairs[i].first  = key;
-    h_pairs[i].second = val;
-  }
-
-  thrust::device_vector<cuco::pair_type<Key, Value>> d_pairs(h_pairs);
-  thrust::device_vector<Key> d_keys(h_keys);
+  thrust::device_vector<Key> keys(num_keys);
+  thrust::device_vector<cuco::pair_type<Key, Value>> pairs(num_keys);
 
   for (auto _ : state) {
+    gen.generate(thrust::device, keys.begin(), keys.end());
+
+    thrust::transform(thrust::device,
+                      keys.cbegin(),
+                      keys.cend(),
+                      pairs.begin(),
+                      [] __host__ __device__(Key const& key) {
+                        return cuco::make_pair<Key, Value>(key, Value(42));
+                      });
+
     map_type map{size, cuco::sentinel::empty_key<Key>{-1}, cuco::sentinel::empty_value<Value>{-1}};
 
     cudaEvent_t start, stop;
@@ -99,7 +71,7 @@ static void BM_static_map_insert(::benchmark::State& state)
     cudaEventCreate(&stop);
 
     cudaEventRecord(start);
-    map.insert(d_pairs.begin(), d_pairs.end());
+    map.insert(pairs.cbegin(), pairs.cend());
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
