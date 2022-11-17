@@ -16,8 +16,10 @@
 
 #pragma once
 
+#include <cstddef>
 namespace cuco {
 namespace experimental {
+// do we want to use int64_t as the default or would that trigger too many warnings on the user end?
 static constexpr std::size_t dynamic_extent = static_cast<std::size_t>(-1);
 
 /**

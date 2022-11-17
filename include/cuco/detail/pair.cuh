@@ -167,6 +167,21 @@ union pair_converter {
   __device__ pair_converter(packed_type p) : packed{p} {}
 };
 
+/**
+ * @brief Extracts the key field from a type/pair
+ *
+ * @param t The type to extract the key field from
+ */
+template <typename T>
+inline constexpr auto get_key(T const& t) noexcept
+{
+  if constexpr (is_std_pair_like<T>::value) { return std::get<0>(t); }
+  if constexpr (is_thrust_pair_like<T>::value) {
+    return thrust::get<0>(t);  // TODO raw_reference_cast?
+  }
+  if constexpr (not(is_std_pair_like<T>::value or is_thrust_pair_like<T>::value)) { return t; }
+}
+
 }  // namespace detail
 
 /**
