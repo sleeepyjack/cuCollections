@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cuco/traits.hpp>
+
 #include <cstdint>
 #include <type_traits>
 
