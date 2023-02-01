@@ -16,9 +16,12 @@
 
 #include <utils.hpp>
 
+#include <cuco/allocator.hpp>
 #include <cuco/traits.hpp>
 
 #include <catch2/catch_template_test_macros.hpp>
+
+#include <memory>
 
 CUCO_DECLARE_BITWISE_COMPARABLE(float)
 
@@ -49,5 +52,23 @@ TEST_CASE("Bitwise-comparability tests", "")
   {
     REQUIRE(not cuco::is_bitwise_comparable_v<double>);
     REQUIRE(not cuco::is_bitwise_comparable_v<invalid_compound_key>);
+  }
+}
+
+struct not_an_allocator {
+};
+
+TEST_CASE("Allocator tests", "")
+{
+  SECTION("Type is allocator-like.")
+  {
+    REQUIRE(cuco::detail::is_allocator_v<std::allocator<int>>);
+    REQUIRE(cuco::detail::is_allocator_v<cuco::cuda_allocator<int>>);
+  }
+
+  SECTION("Type is not allocator-like.")
+  {
+    REQUIRE(not cuco::detail::is_allocator_v<int>);
+    REQUIRE(not cuco::detail::is_allocator_v<not_an_allocator>);
   }
 }
