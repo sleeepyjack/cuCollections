@@ -27,7 +27,9 @@ namespace cuco {
 template <typename T>
 class cuda_allocator {
  public:
-  using value_type = T;  ///< Allocator's value type
+  using value_type = T;            ///< Allocator's value type
+  using pointer    = value_type*;  ///< Allocator's pointer type
+  using size_type  = std::size_t;  ///< Allocator's size type
 
   cuda_allocator() = default;
 
@@ -45,9 +47,9 @@ class cuda_allocator {
    * @param n The number of objects to allocate storage for
    * @return Pointer to the allocated storage
    */
-  value_type* allocate(std::size_t n)
+  pointer allocate(size_type n)
   {
-    value_type* p;
+    pointer p;
     CUCO_CUDA_TRY(cudaMalloc(&p, sizeof(value_type) * n));
     return p;
   }
@@ -57,7 +59,7 @@ class cuda_allocator {
    *
    * @param p Pointer to memory to deallocate
    */
-  void deallocate(value_type* p, std::size_t) { CUCO_CUDA_TRY(cudaFree(p)); }
+  void deallocate(pointer p, size_type) { CUCO_CUDA_TRY(cudaFree(p)); }
 };
 
 template <typename T, typename U>
