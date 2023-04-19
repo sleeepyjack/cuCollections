@@ -37,6 +37,14 @@ void static_set_contains(nvbench::state& state, nvbench::type_list<Key, Dist>)
   auto const occupancy     = state.get_float64_or_default("Occupancy", defaults::OCCUPANCY);
   auto const matching_rate = state.get_float64_or_default("MatchingRate", defaults::MATCHING_RATE);
 
+  using set_type = cuco::experimental::static_set<
+    Key,
+    cuco::experimental::extent<std::size_t>,
+    cuda::thread_scope_device,
+    thrust::equal_to<Key>,
+    cuco::experimental::double_hashing<4,  // CG size
+                                       cuco::default_hash_function<Key>,
+                                       cuco::default_hash_function<Key>>>;
   std::size_t const size = num_keys / occupancy;
 
   thrust::device_vector<Key> keys(num_keys);
@@ -44,7 +52,7 @@ void static_set_contains(nvbench::state& state, nvbench::type_list<Key, Dist>)
   key_generator gen;
   gen.generate(dist_from_state<Dist>(state), keys.begin(), keys.end());
 
-  cuco::experimental::static_set<Key> set{size, cuco::empty_key<Key>{-1}};
+  set_type set{size, cuco::empty_key<Key>{-1}};
   set.insert(keys.begin(), keys.end());
 
   gen.dropout(keys.begin(), keys.end(), matching_rate);

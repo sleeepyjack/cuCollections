@@ -18,6 +18,8 @@
 
 #include <cuco/detail/probe_sequence_impl.cuh>
 
+#include <type_traits>
+
 namespace cuco {
 
 /**
@@ -27,5 +29,18 @@ namespace cuco {
  */
 template <typename Key>
 using murmurhash3_32 = detail::MurmurHash3_32<Key>;
+
+// TODO docs
+template <typename Key>
+using fmix_32 = detail::MurmurHash3_fmix32<Key>;
+
+template <typename Key>
+using fmix_64 = detail::MurmurHash3_fmix64<Key>;
+
+template <typename Key>
+using default_hash_function =
+  std::conditional_t<sizeof(Key) == 4,
+                     fmix_32<Key>,
+                     std::conditional_t<sizeof(Key) == 8, fmix_64<Key>, murmurhash3_32<Key>>>;
 
 }  // namespace cuco
