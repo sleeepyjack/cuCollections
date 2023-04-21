@@ -278,11 +278,6 @@ class key_generator {
   template <typename InOutIt>
   void dropout(InOutIt begin, InOutIt end, double keep_prob, cudaStream_t stream)
   {
-    using thrust::system::detail::generic::select_system;
-
-    typedef typename thrust::iterator_system<InOutIt>::type System;
-    System system;
-
     dropout(begin, end, keep_prob, thrust::cuda::par_nosync.on(stream));
   }
 
