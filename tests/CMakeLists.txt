@@ -39,7 +39,7 @@ function(ConfigureTest TEST_NAME)
     set_target_properties(${TEST_NAME} PROPERTIES
                                        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
     target_compile_options(${TEST_NAME} PRIVATE --compiler-options=-Wall --compiler-options=-Wextra
-      --expt-extended-lambda --expt-relaxed-constexpr -Xcompiler -Wno-subobject-linkage)
+      --expt-extended-lambda --expt-relaxed-constexpr -Xcompiler -Wno-subobject-linkage -v -keep -Xcicc "-v -keep")
     catch_discover_tests(${TEST_NAME} EXTRA_ARGS --allow-running-no-tests)
 endfunction(ConfigureTest)
 
@@ -49,49 +49,52 @@ endfunction(ConfigureTest)
 
 ###################################################################################################
 # - utility tests ---------------------------------------------------------------------------------
-ConfigureTest(UTILITY_TEST
-    utility/extent_test.cu
-    utility/storage_test.cu
-    utility/fast_int_test.cu
-    utility/hash_test.cu)
+# ConfigureTest(UTILITY_TEST
+#     utility/extent_test.cu
+#     utility/storage_test.cu
+#     utility/fast_int_test.cu
+#     utility/hash_test.cu)
 
 ###################################################################################################
 # - static_set tests ------------------------------------------------------------------------------
-ConfigureTest(STATIC_SET_TEST
-    static_set/capacity_test.cu
-    static_set/heterogeneous_lookup_test.cu
-    static_set/insert_and_find_test.cu
-    static_set/large_input_test.cu
-    static_set/retrieve_all_test.cu
-    static_set/size_test.cu
-    static_set/unique_sequence_test.cu)
+# ConfigureTest(STATIC_SET_TEST
+#     static_set/capacity_test.cu
+#     static_set/heterogeneous_lookup_test.cu
+#     static_set/insert_and_find_test.cu
+#     static_set/large_input_test.cu
+#     static_set/retrieve_all_test.cu
+#     static_set/size_test.cu
+#     static_set/unique_sequence_test.cu)
 
 ###################################################################################################
 # - static_map tests ------------------------------------------------------------------------------
-ConfigureTest(STATIC_MAP_TEST
-    static_map/custom_type_test.cu
-    static_map/duplicate_keys_test.cu
-    static_map/erase_test.cu
-    static_map/heterogeneous_lookup_test.cu
-    static_map/insert_and_find_test.cu
-    static_map/key_sentinel_test.cu
-    static_map/shared_memory_test.cu
-    static_map/stream_test.cu
-    static_map/unique_sequence_test.cu)
+# ConfigureTest(STATIC_MAP_TEST
+#     static_map/custom_type_test.cu
+#     static_map/duplicate_keys_test.cu
+#     static_map/erase_test.cu
+#     static_map/heterogeneous_lookup_test.cu
+#     static_map/insert_and_find_test.cu
+#     static_map/key_sentinel_test.cu
+#     static_map/shared_memory_test.cu
+#     static_map/stream_test.cu
+#     static_map/unique_sequence_test.cu)
 
 ###################################################################################################
 # - dynamic_map tests -----------------------------------------------------------------------------
-ConfigureTest(DYNAMIC_MAP_TEST
-    dynamic_map/unique_sequence_test.cu
-    dynamic_map/erase_test.cu)
+# ConfigureTest(DYNAMIC_MAP_TEST
+#     dynamic_map/unique_sequence_test.cu
+#     dynamic_map/erase_test.cu)
 
 ###################################################################################################
 # - static_multimap tests -------------------------------------------------------------------------
-ConfigureTest(STATIC_MULTIMAP_TEST
-    static_multimap/custom_pair_retrieve_test.cu
-    static_multimap/custom_type_test.cu
-    static_multimap/heterogeneous_lookup_test.cu
-    static_multimap/insert_if_test.cu
-    static_multimap/multiplicity_test.cu
-    static_multimap/non_match_test.cu
-    static_multimap/pair_function_test.cu)
+# ConfigureTest(STATIC_MULTIMAP_TEST
+#     static_multimap/custom_pair_retrieve_test.cu
+#     static_multimap/custom_type_test.cu
+#     static_multimap/heterogeneous_lookup_test.cu
+#     static_multimap/insert_if_test.cu
+#     static_multimap/multiplicity_test.cu
+#     static_multimap/non_match_test.cu
+#     static_multimap/pair_function_test.cu)
+
+ConfigureTest(NVCC_SEGFAULT_REPRO
+    static_multimap/nvcc_segfault_repro.cu)
