@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <cuco/detail/utils.cuh>
+#include <cuco/detail/utility/strong_type.hpp>
 
 namespace cuco {
 inline namespace sentinel {

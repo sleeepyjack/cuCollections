@@ -11,7 +11,6 @@
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 #pragma once
@@ -20,13 +19,28 @@
 
 namespace cuco::detail {
 
-template <typename T, typename U, typename Extent>
-constexpr CUCO_HOST_DEVICE T load_chunk(U const* const data, Extent index) noexcept
-{
-  auto const bytes = reinterpret_cast<std::byte const*>(data);
-  T chunk;
-  memcpy(&chunk, bytes + index * sizeof(T), sizeof(T));
-  return chunk;
-}
+/**
+ * @brief A strong type wrapper.
+ *
+ * @tparam T Type of the mapped values
+ */
+template <typename T>
+struct strong_type {
+  /**
+   * @brief Constructs a strong type.
+   *
+   * @param v Value to be wrapped as a strong type
+   */
+  CUCO_HOST_DEVICE explicit constexpr strong_type(T v) : value{v} {}
 
-};  // namespace cuco::detail
+  /**
+   * @brief Implicit conversion operator to the underlying value.
+   *
+   * @return Underlying value
+   */
+  CUCO_HOST_DEVICE constexpr operator T() const noexcept { return value; }
+
+  T value;  ///< Underlying value
+};
+
+}  // namespace cuco::detail

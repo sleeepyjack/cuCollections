@@ -18,6 +18,7 @@
 
 #include <cuco/detail/equal_wrapper.cuh>
 #include <cuco/detail/probing_scheme_base.cuh>
+#include <cuco/detail/utility/traits.hpp>
 #include <cuco/extent.cuh>
 #include <cuco/pair.cuh>
 #include <cuco/probing_scheme.cuh>
@@ -795,7 +796,7 @@ class open_addressing_ref_impl {
       } else if constexpr (Scope == cuda::thread_scope_block) {
         return atomicCAS_block(slot_ptr, *expected_ptr, *desired_ptr);
       } else {
-        static_assert(cuco::dependent_false<decltype(Scope)>, "Unsupported thread scope");
+        static_assert(cuco::detail::dependent_false<decltype(Scope)>, "Unsupported thread scope");
       }
     } else if constexpr (sizeof(T) == sizeof(unsigned long long int)) {
       auto* const slot_ptr           = reinterpret_cast<unsigned long long int*>(address);
@@ -808,7 +809,7 @@ class open_addressing_ref_impl {
       } else if constexpr (Scope == cuda::thread_scope_block) {
         return atomicCAS_block(slot_ptr, *expected_ptr, *desired_ptr);
       } else {
-        static_assert(cuco::dependent_false<decltype(Scope)>, "Unsupported thread scope");
+        static_assert(cuco::detail::dependent_false<decltype(Scope)>, "Unsupported thread scope");
       }
     }
   }
@@ -834,7 +835,7 @@ class open_addressing_ref_impl {
       } else if constexpr (Scope == cuda::thread_scope_block) {
         atomicExch_block(slot_ptr, *value_ptr);
       } else {
-        static_assert(cuco::dependent_false<decltype(Scope)>, "Unsupported thread scope");
+        static_assert(cuco::detail::dependent_false<decltype(Scope)>, "Unsupported thread scope");
       }
     } else if constexpr (sizeof(T) == sizeof(unsigned long long int)) {
       auto* const slot_ptr        = reinterpret_cast<unsigned long long int*>(address);
@@ -846,7 +847,7 @@ class open_addressing_ref_impl {
       } else if constexpr (Scope == cuda::thread_scope_block) {
         atomicExch_block(slot_ptr, *value_ptr);
       } else {
-        static_assert(cuco::dependent_false<decltype(Scope)>, "Unsupported thread scope");
+        static_assert(cuco::detail::dependent_false<decltype(Scope)>, "Unsupported thread scope");
       }
     }
   }

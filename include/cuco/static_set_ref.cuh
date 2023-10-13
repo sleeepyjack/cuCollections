@@ -17,10 +17,11 @@
 #pragma once
 
 #include <cuco/detail/open_addressing/open_addressing_ref_impl.cuh>
-#include <cuco/hash_functions.cuh>
-#include <cuco/operator.hpp>
+#include <cuco/detail/utility/cuda.hpp>  // ok
+#include <cuco/hash_functions.cuh>       // ok
+#include <cuco/operator.hpp>             // ok
 #include <cuco/probing_scheme.cuh>
-#include <cuco/sentinel.cuh>
+#include <cuco/sentinel.cuh>  // ok
 #include <cuco/storage.cuh>
 
 #include <cuda/std/atomic>
@@ -91,10 +92,10 @@ class static_set_ref
    * @param probing_scheme Probing scheme
    * @param storage_ref Non-owning ref of slot storage
    */
-  __host__ __device__ explicit constexpr static_set_ref(cuco::empty_key<Key> empty_key_sentinel,
-                                                        KeyEqual const& predicate,
-                                                        ProbingScheme const& probing_scheme,
-                                                        StorageRef storage_ref) noexcept;
+  CUCO_HOST_DEVICE explicit constexpr static_set_ref(cuco::empty_key<Key> empty_key_sentinel,
+                                                     KeyEqual const& predicate,
+                                                     ProbingScheme const& probing_scheme,
+                                                     StorageRef storage_ref) noexcept;
 
   /**
    * @brief Constructs static_set_ref.
@@ -105,11 +106,11 @@ class static_set_ref
    * @param probing_scheme Probing scheme
    * @param storage_ref Non-owning ref of slot storage
    */
-  __host__ __device__ explicit constexpr static_set_ref(cuco::empty_key<Key> empty_key_sentinel,
-                                                        cuco::erased_key<Key> erased_key_sentinel,
-                                                        KeyEqual const& predicate,
-                                                        ProbingScheme const& probing_scheme,
-                                                        StorageRef storage_ref) noexcept;
+  CUCO_HOST_DEVICE explicit constexpr static_set_ref(cuco::empty_key<Key> empty_key_sentinel,
+                                                     cuco::erased_key<Key> erased_key_sentinel,
+                                                     KeyEqual const& predicate,
+                                                     ProbingScheme const& probing_scheme,
+                                                     StorageRef storage_ref) noexcept;
 
   /**
    * @brief Operator-agnostic move constructor.
@@ -119,7 +120,7 @@ class static_set_ref
    * @param other Object to construct `*this` from
    */
   template <typename... OtherOperators>
-  __host__ __device__ explicit constexpr static_set_ref(
+  CUCO_HOST_DEVICE explicit constexpr static_set_ref(
     static_set_ref<Key, Scope, KeyEqual, ProbingScheme, StorageRef, OtherOperators...>&&
       other) noexcept;
 
@@ -128,14 +129,14 @@ class static_set_ref
    *
    * @return The maximum number of elements the container can hold
    */
-  [[nodiscard]] __host__ __device__ constexpr auto capacity() const noexcept;
+  [[nodiscard]] CUCO_HOST_DEVICE constexpr auto capacity() const noexcept;
 
   /**
    * @brief Gets the sentinel value used to represent an empty key slot.
    *
    * @return The sentinel value used to represent an empty key slot
    */
-  [[nodiscard]] __host__ __device__ constexpr key_type empty_key_sentinel() const noexcept;
+  [[nodiscard]] CUCO_HOST_DEVICE constexpr key_type empty_key_sentinel() const noexcept;
 
   /**
    * @brief Creates a reference with new operators from the current object.
@@ -152,7 +153,7 @@ class static_set_ref
    * @return `*this` with `NewOperators...`
    */
   template <typename... NewOperators>
-  [[nodiscard]] __host__ __device__ auto with(NewOperators... ops) && noexcept;
+  [[nodiscard]] CUCO_HOST_DEVICE auto with(NewOperators... ops) && noexcept;
 
  private:
   impl_type impl_;
@@ -174,4 +175,6 @@ class static_set_ref
 }  // namespace experimental
 }  // namespace cuco
 
+#if defined(__CUDACC__)
 #include <cuco/detail/static_set/static_set_ref.inl>
+#endif

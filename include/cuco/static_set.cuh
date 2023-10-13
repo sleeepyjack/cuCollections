@@ -16,27 +16,18 @@
 
 #pragma once
 
-#include <cuco/cuda_stream_ref.hpp>
-#include <cuco/detail/open_addressing/open_addressing_impl.cuh>
-#include <cuco/extent.cuh>
-#include <cuco/hash_functions.cuh>
+#include <cuco/cuda_stream_ref.hpp>                              // ok
+#include <cuco/detail/open_addressing/open_addressing_decl.cuh>  // ok?
+#include <cuco/extent.cuh>                                       // ok
+#include <cuco/hash_functions.cuh>                               // ok
 #include <cuco/probing_scheme.cuh>
-#include <cuco/sentinel.cuh>
+#include <cuco/sentinel.cuh>  // ok
 #include <cuco/static_set_ref.cuh>
 #include <cuco/storage.cuh>
-#include <cuco/utility/allocator.hpp>
-#include <cuco/utility/traits.hpp>
-
-#include <thrust/functional.h>
-
-#include <cuda/atomic>
-
-#if defined(CUCO_HAS_CUDA_BARRIER)
-#include <cuda/barrier>
-#endif
+#include <cuco/utility/allocator.hpp>  // ok
+#include <cuco/utility/traits.hpp>     // ok
 
 #include <cstddef>
-#include <type_traits>
 
 namespace cuco {
 namespace experimental {
@@ -646,4 +637,6 @@ class static_set {
 }  // namespace experimental
 }  // namespace cuco
 
+#if defined(__CUDACC__)
 #include <cuco/detail/static_set/static_set.inl>
+#endif

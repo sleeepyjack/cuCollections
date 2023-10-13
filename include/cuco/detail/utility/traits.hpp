@@ -11,22 +11,19 @@
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 #pragma once
 
-#include <cuco/detail/utility/cuda.hpp>
+#include <type_traits>
 
 namespace cuco::detail {
 
-template <typename T, typename U, typename Extent>
-constexpr CUCO_HOST_DEVICE T load_chunk(U const* const data, Extent index) noexcept
-{
-  auto const bytes = reinterpret_cast<std::byte const*>(data);
-  T chunk;
-  memcpy(&chunk, bytes + index * sizeof(T), sizeof(T));
-  return chunk;
-}
+// TODO why is this here?
+template <bool value, typename... Args>
+inline constexpr bool dependent_bool_value = value;
 
-};  // namespace cuco::detail
+template <typename... Args>
+inline constexpr bool dependent_false = dependent_bool_value<false, Args...>;
+
+}  // namespace cuco::detail

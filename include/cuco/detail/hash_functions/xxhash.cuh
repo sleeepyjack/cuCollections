@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cuco/detail/hash_functions/utils.cuh>
+#include <cuco/detail/utility/cuda.hpp>
 #include <cuco/extent.cuh>
 
 #include <cstddef>
@@ -79,7 +80,7 @@ struct XXHash_32 {
    *
    * @param seed A custom number to randomize the resulting hash value
    */
-  __host__ __device__ constexpr XXHash_32(std::uint32_t seed = 0) : seed_{seed} {}
+  CUCO_HOST_DEVICE constexpr XXHash_32(std::uint32_t seed = 0) : seed_{seed} {}
 
   /**
    * @brief Returns a hash value for its argument, as a value of type `result_type`.
@@ -87,7 +88,7 @@ struct XXHash_32 {
    * @param key The input argument to hash
    * @return The resulting hash value for `key`
    */
-  constexpr result_type __host__ __device__ operator()(Key const& key) const noexcept
+  constexpr result_type CUCO_HOST_DEVICE operator()(Key const& key) const noexcept
   {
     return compute_hash(reinterpret_cast<std::byte const*>(&key),
                         cuco::experimental::extent<std::size_t, sizeof(Key)>{});
@@ -103,8 +104,8 @@ struct XXHash_32 {
    * @return The resulting hash value
    */
   template <typename Extent>
-  constexpr result_type __host__ __device__ compute_hash(std::byte const* bytes,
-                                                         Extent size) const noexcept
+  constexpr result_type CUCO_HOST_DEVICE compute_hash(std::byte const* bytes,
+                                                      Extent size) const noexcept
   {
     std::size_t offset = 0;
     std::uint32_t h32;
@@ -163,13 +164,13 @@ struct XXHash_32 {
   }
 
  private:
-  constexpr __host__ __device__ std::uint32_t rotl(std::uint32_t h, std::int8_t r) const noexcept
+  constexpr CUCO_HOST_DEVICE std::uint32_t rotl(std::uint32_t h, std::int8_t r) const noexcept
   {
     return ((h << r) | (h >> (32 - r)));
   }
 
   // avalanche helper
-  constexpr __host__ __device__ std::uint32_t finalize(std::uint32_t h) const noexcept
+  constexpr CUCO_HOST_DEVICE std::uint32_t finalize(std::uint32_t h) const noexcept
   {
     h ^= h >> 15;
     h *= prime2;
@@ -241,7 +242,7 @@ struct XXHash_64 {
    *
    * @param seed A custom number to randomize the resulting hash value
    */
-  __host__ __device__ constexpr XXHash_64(std::uint64_t seed = 0) : seed_{seed} {}
+  CUCO_HOST_DEVICE constexpr XXHash_64(std::uint64_t seed = 0) : seed_{seed} {}
 
   /**
    * @brief Returns a hash value for its argument, as a value of type `result_type`.
@@ -249,7 +250,7 @@ struct XXHash_64 {
    * @param key The input argument to hash
    * @return The resulting hash value for `key`
    */
-  constexpr result_type __host__ __device__ operator()(Key const& key) const noexcept
+  constexpr result_type CUCO_HOST_DEVICE operator()(Key const& key) const noexcept
   {
     return compute_hash(reinterpret_cast<std::byte const*>(&key),
                         cuco::experimental::extent<std::size_t, sizeof(Key)>{});
@@ -265,8 +266,8 @@ struct XXHash_64 {
    * @return The resulting hash value
    */
   template <typename Extent>
-  constexpr result_type __host__ __device__ compute_hash(std::byte const* bytes,
-                                                         Extent size) const noexcept
+  constexpr result_type CUCO_HOST_DEVICE compute_hash(std::byte const* bytes,
+                                                      Extent size) const noexcept
   {
     std::size_t offset = 0;
     std::uint64_t h64;
@@ -359,13 +360,13 @@ struct XXHash_64 {
   }
 
  private:
-  constexpr __host__ __device__ std::uint64_t rotl(std::uint64_t h, std::int8_t r) const noexcept
+  constexpr CUCO_HOST_DEVICE std::uint64_t rotl(std::uint64_t h, std::int8_t r) const noexcept
   {
     return ((h << r) | (h >> (64 - r)));
   }
 
   // avalanche helper
-  constexpr __host__ __device__ std::uint64_t finalize(std::uint64_t h) const noexcept
+  constexpr CUCO_HOST_DEVICE std::uint64_t finalize(std::uint64_t h) const noexcept
   {
     h ^= h >> 33;
     h *= prime2;

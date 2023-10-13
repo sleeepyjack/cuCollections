@@ -61,4 +61,6 @@ struct find_tag {
 }  // namespace experimental
 }  // namespace cuco
 
+#if defined(__CUDACC__)
 #include <cuco/detail/operator.inl>
+#endif

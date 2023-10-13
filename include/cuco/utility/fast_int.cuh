@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <cuco/detail/__config>
+#include <cuco/detail/utility/cuda.hpp>
 
 #include <cstdint>
 #include <cuda/std/bit>
@@ -33,7 +33,7 @@ namespace cuco::utility {
 template <typename T>
 struct fast_int {
   static_assert(cuda::std::is_same_v<T, std::int32_t> or cuda::std::is_same_v<T, std::uint32_t>
-#if defined(CUCO_HAS_INT128)
+#if defined(__SIZEOF_INT128__)
                   or cuda::std::is_same_v<T, std::int64_t> or cuda::std::is_same_v<T, std::uint64_t>
 #endif
                 ,
@@ -46,7 +46,7 @@ struct fast_int {
    *
    * @param value Integer value
    */
-  __host__ __device__ explicit constexpr fast_int(T value) noexcept : value_{value}
+  CUCO_HOST_DEVICE explicit constexpr fast_int(T value) noexcept : value_{value}
   {
     evaluate_magic_numbers();
   }
@@ -56,14 +56,14 @@ struct fast_int {
    *
    * @return Underlying value
    */
-  __host__ __device__ constexpr value_type value() const noexcept { return value_; }
+  CUCO_HOST_DEVICE constexpr value_type value() const noexcept { return value_; }
 
   /**
    * @brief Explicit conversion operator to the underlying value type.
    *
    * @return Underlying value
    */
-  __host__ __device__ explicit constexpr operator value_type() const noexcept { return value_; }
+  CUCO_HOST_DEVICE explicit constexpr operator value_type() const noexcept { return value_; }
 
  private:
   using intermediate_type =
@@ -84,8 +84,8 @@ struct fast_int {
    *
    * @return High bits of the multiplication
    */
-  __host__ __device__ constexpr value_type mulhi(unsigned_value_type lhs,
-                                                 unsigned_value_type rhs) const noexcept
+  CUCO_HOST_DEVICE constexpr value_type mulhi(unsigned_value_type lhs,
+                                              unsigned_value_type rhs) const noexcept
   {
 #if defined(__CUDA_ARCH__)
     if constexpr (sizeof(value_type) == 4) {
@@ -105,7 +105,7 @@ struct fast_int {
    *
    * @return Log2 of the unsigned integer
    */
-  __host__ __device__ constexpr value_type log2(value_type v) const noexcept
+  CUCO_HOST_DEVICE constexpr value_type log2(value_type v) const noexcept
   {
     return cuda::std::bit_width(unsigned_value_type(v)) - 1;
   }
@@ -113,7 +113,7 @@ struct fast_int {
   /**
    * @brief Computes the magic numbers for the fast division.
    */
-  __host__ __device__ constexpr void evaluate_magic_numbers() noexcept
+  CUCO_HOST_DEVICE constexpr void evaluate_magic_numbers() noexcept
   {
     // TODO assert(value_ > 0);
     auto const val_log2 = this->log2(value_);
@@ -140,7 +140,7 @@ struct fast_int {
   value_type shift_;  ///< Shift for fast division
 
   template <typename Lhs>
-  friend __host__ __device__ constexpr value_type operator/(Lhs lhs, fast_int const& rhs) noexcept
+  friend CUCO_HOST_DEVICE constexpr value_type operator/(Lhs lhs, fast_int const& rhs) noexcept
   {
     static_assert(cuda::std::is_same_v<Lhs, value_type>,
                   "Left-hand side operand must be of type value_type.");
@@ -151,7 +151,7 @@ struct fast_int {
   }
 
   template <typename Lhs>
-  friend __host__ __device__ constexpr value_type operator%(Lhs lhs, fast_int const& rhs) noexcept
+  friend CUCO_HOST_DEVICE constexpr value_type operator%(Lhs lhs, fast_int const& rhs) noexcept
   {
     return lhs - (lhs / rhs) * rhs.value_;
   }

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <cuco/utility/traits.hpp>
+#include <cuco/detail/utility/traits.hpp>
 
 #include <type_traits>
 
@@ -36,7 +36,7 @@ namespace detail {
  */
 template <typename Operator, typename Reference>
 class operator_impl {
-  static_assert(cuco::dependent_false<Operator, Reference>,
+  static_assert(cuco::detail::dependent_false<Operator, Reference>,
                 "Operator type is not supported by reference type.");
 };
 

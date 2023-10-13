@@ -16,17 +16,29 @@
 
 #pragma once
 
-#include <cuco/detail/utility/cuda.hpp>
+#include <cuda/std/atomic>
 
-namespace cuco::detail {
+namespace cuco {
+namespace experimental {
+namespace detail {
 
-template <typename T, typename U, typename Extent>
-constexpr CUCO_HOST_DEVICE T load_chunk(U const* const data, Extent index) noexcept
-{
-  auto const bytes = reinterpret_cast<std::byte const*>(data);
-  T chunk;
-  memcpy(&chunk, bytes + index * sizeof(T), sizeof(T));
-  return chunk;
-}
+template <class Key,
+          class Value,
+          class Extent,
+          cuda::thread_scope Scope,
+          class KeyEqual,
+          class ProbingScheme,
+          class Allocator,
+          class Storage>
+class open_addressing_impl;
 
-};  // namespace cuco::detail
+template <typename Key,
+          cuda::thread_scope Scope,
+          typename KeyEqual,
+          typename ProbingScheme,
+          typename StorageRef>
+class open_addressing_ref_impl;
+
+}  // namespace detail
+}  // namespace experimental
+}  // namespace cuco

@@ -14,15 +14,22 @@
  * limitations under the License.
  */
 
-#include <cuco/cuda_stream_ref.hpp>
+#include <cuco/detail/open_addressing/open_addressing_impl.cuh>
 #include <cuco/detail/static_set/functors.cuh>
 #include <cuco/detail/static_set/kernels.cuh>
 #include <cuco/detail/utility/cuda.hpp>
 #include <cuco/detail/utils.hpp>
 #include <cuco/operator.hpp>
-#include <cuco/static_set_ref.cuh>
 
-#include <cstddef>
+#include <thrust/functional.h>
+
+#include <cuda/atomic>
+
+#if defined(CUCO_HAS_CUDA_BARRIER)
+#include <cuda/barrier>
+#endif
+
+#include <type_traits>
 
 namespace cuco {
 namespace experimental {

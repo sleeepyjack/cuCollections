@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cuco/detail/utility/cuda.hpp>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -36,14 +38,14 @@ struct extent {
   constexpr extent() = default;
 
   /// Constructs from `SizeType`
-  __host__ __device__ constexpr extent(SizeType) noexcept {}
+  CUCO_HOST_DEVICE constexpr extent(SizeType) noexcept {}
 
   /**
    * @brief Conversion to value_type.
    *
    * @return Extent size
    */
-  __host__ __device__ constexpr operator value_type() const noexcept { return N; }
+  CUCO_HOST_DEVICE constexpr operator value_type() const noexcept { return N; }
 };
 
 /**
@@ -60,14 +62,14 @@ struct extent<SizeType, dynamic_extent> {
    *
    * @param size The extent size
    */
-  __host__ __device__ constexpr extent(SizeType size) noexcept : value_{size} {}
+  CUCO_HOST_DEVICE constexpr extent(SizeType size) noexcept : value_{size} {}
 
   /**
    * @brief Conversion to value_type.
    *
    * @return Extent size
    */
-  __host__ __device__ constexpr operator value_type() const noexcept { return value_; }
+  CUCO_HOST_DEVICE constexpr operator value_type() const noexcept { return value_; }
 
  private:
   value_type value_;  ///< Extent value

@@ -17,6 +17,16 @@
 
 #include <cuco/detail/utility/math.hpp>
 
+#if defined(__CUDACC__)
+#define CUCO_HOST        __host__
+#define CUCO_DEVICE      __device__
+#define CUCO_HOST_DEVICE __host__ __device__
+#else
+#define CUCO_HOST
+#define CUCO_DEVICE
+#define CUCO_HOST_DEVICE
+#endif
+
 namespace cuco {
 namespace detail {
 
