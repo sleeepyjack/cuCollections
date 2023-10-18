@@ -443,21 +443,25 @@ class operator_impl<
       auto const window_slots = storage_ref[*probing_iter];
 
       for (auto& slot_content : window_slots) {
-        auto const eq_res = ref_.impl_.predicate()(slot_content.first, key);
+        auto const eq_res             = ref_.impl_.predicate()(slot_content.first, key);
+        auto const intra_window_index = thrust::distance(window_slots.begin(), &slot_content);
+        auto slot_ptr = (storage_ref.data() + *probing_iter)->data() + intra_window_index;
 
         // If the key is already in the container, update the payload and return
         if (eq_res == detail::equal_result::EQUAL) {
-          auto const intra_window_index = thrust::distance(window_slots.begin(), &slot_content);
-          op(((storage_ref.data() + *probing_iter)->data() + intra_window_index)->second,
-             static_cast<T>(thrust::get<1>(value)));
+          wait_for_payload(slot_ptr->second, ref_.impl_.empty_value_sentinel());
+          op(slot_ptr->second, static_cast<T>(thrust::get<1>(value)));
           return;
         }
         if (eq_res == detail::equal_result::EMPTY or
             cuco::detail::bitwise_compare(slot_content.first, ref_.impl_.erased_key_sentinel())) {
-          auto const intra_window_index = thrust::distance(window_slots.begin(), &slot_content);
-          if (attempt_insert_or_apply(
-                (storage_ref.data() + *probing_iter)->data() + intra_window_index, value, op)) {
-            return;
+          switch (ref_.impl_.attempt_insert_stable(slot_ptr, slot_content, value, op)) {
+            case insert_result::CONTINUE: continue;
+            case insert_result::SUCCESS: return;
+            case insert_result::DUPLICATE: {
+              wait_for_payload(slot_ptr->second, ref_.impl_.empty_value_sentinel());
+              op(slot_ptr->second, static_cast<T>(thrust::get<1>(value)));
+            }
           }
         }
       }
@@ -567,42 +571,13 @@ class operator_impl<
 
  private:
   // TODO docs
-  /**
-   * @brief Attempts to insert an element into a slot or update the matching payload with the given
-   * element
-   *
-   * @brief Inserts a key-value pair `{k, v}` if it's not present in the map. Otherwise, assigns `v`
-   * to the mapped_type corresponding to the key `k`.
-   *
-   * @tparam Value Input type which is implicitly convertible to 'value_type'
-   *
-   * @param group The Cooperative Group used to perform group insert
-   * @param value The element to insert
-   *
-   * @return Returns `true` if the given `value` is inserted or `value` has a match in the map.
-   */
-  template <typename Value, typename Op>
-  __device__ constexpr bool attempt_insert_or_apply(value_type* slot,
-                                                    Value const& value,
-                                                    Op op) noexcept
+  __device__ void wait_for_payload(T& payload_slot, T const& old) const noexcept
   {
-    ref_type& ref_          = static_cast<ref_type&>(*this);
-    auto const expected_key = ref_.impl_.empty_slot_sentinel().first;
-
-    auto old_key = ref_.impl_.compare_and_swap(
-      &slot->first, expected_key, static_cast<key_type>(thrust::get<0>(value)));
-    auto* old_key_ptr = reinterpret_cast<key_type*>(&old_key);
-
-    // if key success or key was already present in the map
-    if (cuco::detail::bitwise_compare(*old_key_ptr, expected_key) or
-        (ref_.impl_.predicate().equal_to(*old_key_ptr,
-                                         thrust::get<0>(thrust::raw_reference_cast(value))) ==
-         detail::equal_result::EQUAL)) {
-      // Update payload
-      op(slot->second, static_cast<T>(thrust::get<1>(value)));
-      return true;
+    if constexpr (sizeof(value_type) > 8) {
+      auto ref = cuda::atomic_ref<T, Scope>(payload_slot);
+      // TODO this is dumb
+      while (old == ref.load(cuda::memory_order_relaxed)) {}
     }
-    return false;
   }
 };
 
