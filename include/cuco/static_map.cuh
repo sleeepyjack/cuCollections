@@ -96,14 +96,14 @@ template <class Key,
           class Storage            = cuco::storage<1>>
 class static_map {
   static_assert(sizeof(Key) <= 8, "Container does not support key types larger than 8 bytes.");
+  /*
+    static_assert(sizeof(T) <= 8, "Container does not support payload types larger than 8 bytes.");
 
-  static_assert(sizeof(T) <= 8, "Container does not support payload types larger than 8 bytes.");
-
-  static_assert(cuco::is_bitwise_comparable_v<T>,
-                "Mapped type must have unique object representations or have been explicitly "
-                "declared as safe for bitwise comparison via specialization of "
-                "cuco::is_bitwise_comparable_v<T>.");
-
+    static_assert(cuco::is_bitwise_comparable_v<T>,
+                  "Mapped type must have unique object representations or have been explicitly "
+                  "declared as safe for bitwise comparison via specialization of "
+                  "cuco::is_bitwise_comparable_v<T>.");
+  */
   using impl_type = detail::open_addressing_impl<Key,
                                                  cuco::pair<Key, T>,
                                                  Extent,

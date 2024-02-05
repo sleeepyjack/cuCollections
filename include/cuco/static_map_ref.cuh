@@ -69,14 +69,14 @@ class static_map_ref
       static_map_ref<Key, T, Scope, KeyEqual, ProbingScheme, StorageRef, Operators...>>... {
   using impl_type =
     detail::open_addressing_ref_impl<Key, Scope, KeyEqual, ProbingScheme, StorageRef>;
+  /*
+    static_assert(sizeof(T) <= 8, "Container does not support payload types larger than 8 bytes.");
 
-  static_assert(sizeof(T) <= 8, "Container does not support payload types larger than 8 bytes.");
-
-  static_assert(
-    cuco::is_bitwise_comparable_v<Key>,
-    "Key type must have unique object representations or have been explicitly declared as safe for "
-    "bitwise comparison via specialization of cuco::is_bitwise_comparable_v<Key>.");
-
+    static_assert(
+      cuco::is_bitwise_comparable_v<Key>,
+      "Key type must have unique object representations or have been explicitly declared as safe for
+    " "bitwise comparison via specialization of cuco::is_bitwise_comparable_v<Key>.");
+  */
  public:
   using key_type            = Key;                                     ///< Key type
   using mapped_type         = T;                                       ///< Mapped type

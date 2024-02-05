@@ -25,15 +25,50 @@
 #include <thrust/device_vector.h>
 #include <thrust/transform.h>
 
+#include <cuda/std/array>
+
 using namespace cuco::benchmark;
 using namespace cuco::utility;
+
+template <int32_t Bytes>
+struct bytes {
+  using word_type = int32_t;
+  static_assert(Bytes % sizeof(word_type) == 0);
+
+  static constexpr auto words = Bytes / sizeof(word_type);
+
+  // Default constructor initializing all elements to 0
+  __host__ __device__ constexpr bytes() noexcept : data_{} {}
+
+  // Constructor with seed to initialize all elements
+  __host__ __device__ constexpr bytes(word_type seed) noexcept
+    : data_(init_array(seed, cuda::std::make_index_sequence<words>{}))
+  {
+  }
+
+  // Comparison operator
+  __host__ __device__ constexpr bool operator==(const bytes& other) const
+  {
+    return cuda::std::equal(data_.begin(), data_.end(), other.data_.begin());
+  }
+
+ private:
+  template <std::size_t... I>
+  __host__ __device__ static constexpr cuda::std::array<word_type, words> init_array(
+    word_type seed, cuda::std::index_sequence<I...>)
+  {
+    // Use seed and expand it Words times using the pack expansion trick with I...
+    return {{((void)I, seed)...}};
+  }
+
+  cuda::std::array<word_type, words> data_;
+};
 
 /**
  * @brief A benchmark evaluating `cuco::static_map::insert` performance
  */
 template <typename Key, typename Value, typename Dist>
-std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> static_map_insert(
-  nvbench::state& state, nvbench::type_list<Key, Value, Dist>)
+void static_map_insert(nvbench::state& state, nvbench::type_list<Key, Value, Dist>)
 {
   using pair_type = cuco::pair<Key, Value>;
 
@@ -71,12 +106,14 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> static_map_insert(
   });
 }
 
+/*
 template <typename Key, typename Value, typename Dist>
 std::enable_if_t<(sizeof(Key) != sizeof(Value)), void> static_map_insert(
   nvbench::state& state, nvbench::type_list<Key, Value, Dist>)
 {
   state.skip("Key should be the same type as Value.");
 }
+*/
 
 NVBENCH_BENCH_TYPES(static_map_insert,
                     NVBENCH_TYPE_AXES(defaults::KEY_TYPE_RANGE,
@@ -104,3 +141,13 @@ NVBENCH_BENCH_TYPES(static_map_insert,
   .set_type_axes_names({"Key", "Value", "Distribution"})
   .set_max_noise(defaults::MAX_NOISE)
   .add_float64_axis("Skew", defaults::SKEW_RANGE);
+
+NVBENCH_BENCH_TYPES(static_map_insert,
+                    NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::int64_t>,
+                                      nvbench::type_list<bytes<128>, bytes<256>, bytes<512>>,
+                                      nvbench::type_list<distribution::unique>))
+  .set_name("static_map_insert_unique_occupancy_large_payload")
+  .set_type_axes_names({"Key", "Value", "Distribution"})
+  .set_max_noise(defaults::MAX_NOISE)
+  .add_float64_axis("Occupancy", defaults::OCCUPANCY_RANGE)
+  .add_int64_axis("NumInputs", {100'000});

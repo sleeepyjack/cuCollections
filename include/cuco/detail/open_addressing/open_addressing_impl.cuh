@@ -70,7 +70,8 @@ template <class Key,
 class open_addressing_impl {
   static_assert(sizeof(Key) <= 8, "Container does not support key types larger than 8 bytes.");
 
-  static_assert(sizeof(Value) <= 16, "Container does not support slot types larger than 16 bytes.");
+  // static_assert(sizeof(Value) <= 16, "Container does not support slot types larger than 16
+  // bytes.");
 
   static_assert(
     cuco::is_bitwise_comparable_v<Key>,

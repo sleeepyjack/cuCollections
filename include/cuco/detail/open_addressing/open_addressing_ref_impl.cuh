@@ -969,6 +969,8 @@ class open_addressing_ref_impl {
       } else {
         static_assert(cuco::dependent_false<decltype(Scope)>, "Unsupported thread scope");
       }
+    } else {
+      *address = value;
     }
   }
 
@@ -1210,7 +1212,11 @@ class open_addressing_ref_impl {
 #if (_CUDA_ARCH__ < 700)
       return cas_dependent_write(address, expected, desired);
 #else
-      return back_to_back_cas(address, expected, desired);
+      if constexpr (sizeof(value_type) > 16) {
+        return cas_dependent_write(address, expected, desired);
+      } else {
+        return back_to_back_cas(address, expected, desired);
+      }
 #endif
     }
   }
