@@ -162,7 +162,8 @@ class hyperloglog_ref {
     int block_size        = 0;
     int const shmem_bytes = sketch_bytes();
 
-    if (thrust::is_contiguous_iterator_v<InputIt> and
+    bool use_pipeline = true;
+    if (use_pipeline and thrust::is_contiguous_iterator_v<InputIt> and sizeof(value_type) < 16 and
         this->try_reserve_shmem(cuco::hyperloglog_ns::detail::add_shmem_pipelined<hyperloglog_ref>,
                                 shmem_bytes)) {
       // Computes intermediate sketches in shared memory and uses memcpy_async to overlap memory
@@ -176,7 +177,7 @@ class hyperloglog_ref {
         &block_size,
         &cuco::hyperloglog_ns::detail::add_shmem_pipelined<hyperloglog_ref>,
         shmem_bytes));
-
+      // printf("pipelined %d %d %d\n", grid_size, block_size, shmem_bytes);
       cuco::hyperloglog_ns::detail::
         add_shmem_pipelined<<<grid_size, block_size, shmem_bytes, stream>>>(
           thrust::raw_pointer_cast(&first[0]), num_items, *this);
@@ -189,6 +190,7 @@ class hyperloglog_ref {
         &block_size,
         &cuco::hyperloglog_ns::detail::add_shmem<InputIt, hyperloglog_ref>,
         shmem_bytes));
+      // printf("shmem %d %d %d\n", grid_size, block_size, shmem_bytes);
 
       cuco::hyperloglog_ns::detail::add_shmem<<<grid_size, block_size, shmem_bytes, stream>>>(
         first, num_items, *this);
