@@ -34,6 +34,33 @@ CUCO_KERNEL void clear(RefType ref)
   if (block.group_index().x == 0) { ref.clear(block); }
 }
 
+template <class RefType>
+CUCO_KERNEL void add_shmem_pipelined(typename RefType::value_type* __restrict__ const first,
+                                     cuco::detail::index_type n,
+                                     RefType ref)
+{
+  using local_ref_type = typename RefType::with_scope<cuda::thread_scope_block>;
+
+  // TODO assert alignment
+  extern __shared__ std::byte local_sketch[];
+
+  auto const loop_stride = cuco::detail::grid_stride();
+  auto idx               = cuco::detail::global_thread_id();
+  auto const block       = cooperative_groups::this_thread_block();
+
+  local_ref_type local_ref(cuda::std::span{local_sketch, ref.sketch_bytes()}, {});
+  local_ref.clear(block);
+  block.sync();
+
+  while (idx < n) {
+    local_ref.add(*(first + idx));
+    idx += loop_stride;
+  }
+  block.sync();
+
+  ref.merge(block, local_ref);
+}
+
 template <class InputIt, class RefType>
 CUCO_KERNEL void add_shmem(InputIt first, cuco::detail::index_type n, RefType ref)
 {
