@@ -529,6 +529,31 @@ class open_addressing_impl {
         first, num_keys, output_begin, container_ref);
   }
 
+  template <typename InputIt, typename OutputIt1, typename OutputIt2, typename Ref>
+  cuda::std::pair<OutputIt1, OutputIt2> retrieve(InputIt first,
+                                                 InputIt last,
+                                                 OutputIt1 output_probe,
+                                                 OutputIt2 output_match,
+                                                 Ref container_ref,
+                                                 cuda_stream_ref stream) const
+  {
+    auto const num_keys = cuco::detail::distance(first, last);
+    if (num_keys == 0) { return {output_probe, output_match}; }
+
+    auto counter = detail::counter_storage<size_type, thread_scope, allocator_type>{
+      this->storage_->allocator()};  // TODOO allocator
+    counter.reset(stream);
+
+    auto const grid_size = cuco::detail::grid_size(num_keys, cg_size);
+
+    detail::retrieve<cuco::detail::default_block_size()>
+      <<<grid_size, cuco::detail::default_block_size(), 0, stream>>>(
+        first, num_keys, output_probe, output_match, counter.data(), contaner_ref);
+
+    auto const count = counter.load_to_host(stream);
+    return {output_probe + count, output_match + count};
+  }
+
   /**
    * @brief Retrieves all keys contained in the container.
    *

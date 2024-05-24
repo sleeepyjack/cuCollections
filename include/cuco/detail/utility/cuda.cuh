@@ -39,6 +39,8 @@ namespace detail {
 /// CUDA warp size
 __device__ constexpr int32_t warp_size() noexcept { return 32; }
 
+__device__ constexpr int32_t max_static_shmem_bytes() noexcept { return 48 * 1024; }
+
 /**
  * @brief Returns the global thread index in a 1D scalar grid
  *
