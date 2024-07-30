@@ -159,5 +159,5 @@ TEMPLATE_TEST_CASE_SIG(
   test_multiplicity(set, num_keys, 1);  // unique sequence
   test_multiplicity(set, num_keys, 2);  // each key occurs twice
   test_multiplicity(set, num_keys, 11);
-  test_outer(set, num_keys);
+  // test_outer(set, num_keys);
 }

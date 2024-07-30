@@ -65,7 +65,7 @@ std::enable_if_t<(sizeof(Key) == sizeof(Value)), void> static_multimap_retrieve(
   thrust::device_vector<pair_type> output(output_size);
 
   state.exec(nvbench::exec_tag::sync, [&](nvbench::launch& launch) {
-    map.retrieve_outer(keys.begin(), keys.end(), output.begin(), launch.get_stream());
+    map.retrieve(keys.begin(), keys.end(), output.begin(), launch.get_stream());
   });
 }
 

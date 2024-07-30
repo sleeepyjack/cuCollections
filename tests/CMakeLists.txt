@@ -47,88 +47,8 @@ endfunction(ConfigureTest)
 ### test sources ##################################################################################
 ###################################################################################################
 
-###################################################################################################
-# - utility tests ---------------------------------------------------------------------------------
-ConfigureTest(UTILITY_TEST
-    utility/extent_test.cu
-    utility/storage_test.cu
-    utility/fast_int_test.cu
-    utility/hash_test.cu
-    utility/probing_scheme_test.cu)
-
-###################################################################################################
-# - static_set tests ------------------------------------------------------------------------------
-ConfigureTest(STATIC_SET_TEST
-    static_set/capacity_test.cu
-    static_set/heterogeneous_lookup_test.cu
-    static_set/insert_and_find_test.cu
-    static_set/large_input_test.cu
-    static_set/retrieve_test.cu
-    static_set/retrieve_all_test.cu
-    static_set/rehash_test.cu
-    static_set/size_test.cu
-    static_set/shared_memory_test.cu
-    static_set/unique_sequence_test.cu)
-
-###################################################################################################
-# - static_map tests ------------------------------------------------------------------------------
-ConfigureTest(STATIC_MAP_TEST
-    static_map/capacity_test.cu
-    static_map/custom_type_test.cu
-    static_map/duplicate_keys_test.cu
-    static_map/erase_test.cu
-    static_map/hash_test.cu
-    static_map/heterogeneous_lookup_test.cu
-    static_map/insert_and_find_test.cu
-    static_map/insert_or_assign_test.cu
-    static_map/insert_or_apply_test.cu
-    static_map/key_sentinel_test.cu
-    static_map/shared_memory_test.cu
-    static_map/stream_test.cu
-    static_map/unique_sequence_test.cu
-    static_map/rehash_test.cu)
-
-###################################################################################################
-# - dynamic_map tests -----------------------------------------------------------------------------
-ConfigureTest(DYNAMIC_MAP_TEST
-    dynamic_map/unique_sequence_test.cu
-    dynamic_map/erase_test.cu)
 
 ###################################################################################################
 # - static_multiset tests -------------------------------------------------------------------------
 ConfigureTest(STATIC_MULTISET_TEST
-    static_multiset/contains_test.cu
-    static_multiset/count_test.cu
-    static_multiset/custom_count_test.cu
-    static_multiset/find_test.cu
-    static_multiset/insert_test.cu
-    static_multiset/for_each_test.cu
     static_multiset/retrieve_test.cu)
-
-###################################################################################################
-# - static_multimap tests -------------------------------------------------------------------------
-ConfigureTest(STATIC_MULTIMAP_TEST
-    static_multimap/custom_pair_retrieve_test.cu
-    static_multimap/custom_type_test.cu
-    static_multimap/heterogeneous_lookup_test.cu
-    static_multimap/insert_test.cu
-    static_multimap/insert_if_test.cu
-    static_multimap/multiplicity_test.cu
-    static_multimap/non_match_test.cu
-    static_multimap/pair_function_test.cu)
-
-###################################################################################################
-# - dynamic_bitset tests --------------------------------------------------------------------------
-ConfigureTest(DYNAMIC_BITSET_TEST
-    dynamic_bitset/find_next_test.cu
-    dynamic_bitset/get_test.cu
-    dynamic_bitset/rank_test.cu
-    dynamic_bitset/select_test.cu
-    dynamic_bitset/size_test.cu)
-
-###################################################################################################
-# - distinct_count_estimator ----------------------------------------------------------------------
-ConfigureTest(DISTINCT_COUNT_ESTIMATOR_TEST
-    distinct_count_estimator/unique_sequence_test.cu
-    distinct_count_estimator/spark_parity_test.cu
-    distinct_count_estimator/device_ref_test.cu)

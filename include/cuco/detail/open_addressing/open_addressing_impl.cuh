@@ -1055,7 +1055,7 @@ class open_addressing_impl {
     // grid_size *= 64;  // oversubscription factor
     // // TODO shrink grid if n is very small
 
-    auto constexpr grid_stride = 1;
+    auto constexpr grid_stride = 4;
     auto const grid_size       = cuco::detail::grid_size(n, cg_size, grid_stride, block_size);
 
     detail::retrieve<IsOuter, block_size><<<grid_size, block_size, 0, stream.get()>>>(

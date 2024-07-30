@@ -367,12 +367,13 @@ template <bool IsOuter,
           class OutputMatchIt,
           class AtomicCounter,
           class Ref>
-CUCO_KERNEL __launch_bounds__(BlockSize) void retrieve(InputProbeIt input_probe,
-                                                       cuco::detail::index_type n,
-                                                       OutputProbeIt output_probe,
-                                                       OutputMatchIt output_match,
-                                                       AtomicCounter* atomic_counter,
-                                                       Ref ref)
+CUCO_KERNEL __launch_bounds__(BlockSize) /*__maxnreg__(32)*/ void retrieve(
+  InputProbeIt input_probe,
+  cuco::detail::index_type n,
+  OutputProbeIt output_probe,
+  OutputMatchIt output_match,
+  AtomicCounter* atomic_counter,
+  Ref ref)
 {
   namespace cg = cooperative_groups;
 

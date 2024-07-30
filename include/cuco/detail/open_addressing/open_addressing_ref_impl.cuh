@@ -24,6 +24,7 @@
 #include <cuco/probing_scheme.cuh>
 
 #include <cuda/atomic>
+#include <cuda/std/bit>
 #include <cuda/std/type_traits>
 #include <thrust/distance.h>
 #include <thrust/tuple.h>
@@ -32,6 +33,8 @@
 #endif
 
 #include <cooperative_groups.h>
+#include <cooperative_groups/memcpy_async.h>
+#include <cooperative_groups/scan.h>
 
 #include <cstdint>
 #include <type_traits>
@@ -1116,7 +1119,7 @@ class open_addressing_ref_impl {
     using probe_type = typename std::iterator_traits<InputProbeIt>::value_type;
 
     // tuning parameter
-    auto constexpr buffer_multiplier = 1;
+    auto constexpr buffer_multiplier = 2;
     static_assert(buffer_multiplier > 0);
 
     auto constexpr probing_tile_size  = cg_size;
@@ -1124,6 +1127,7 @@ class open_addressing_ref_impl {
     static_assert(flushing_tile_size >= probing_tile_size);
 
     auto constexpr num_flushing_tiles   = BlockSize / flushing_tile_size;
+    auto constexpr num_probing_tiles    = BlockSize / probing_tile_size;
     auto constexpr max_matches_per_step = flushing_tile_size * window_size;
     auto constexpr buffer_size          = buffer_multiplier * max_matches_per_step;
 
@@ -1131,161 +1135,240 @@ class open_addressing_ref_impl {
     auto const probing_tile  = cg::tiled_partition<probing_tile_size>(block);
 
     auto const flushing_tile_id = flushing_tile.meta_group_rank();
-    auto idx                    = probing_tile.meta_group_rank();
+    auto const probing_tile_id  = probing_tile.meta_group_rank();
+    auto idx                    = probing_tile_id;  // probing_tile.meta_group_rank();
     auto const stride           = probing_tile.meta_group_size();
+    bool last                   = false;
 
     // TODO align to 16B?
+    // __shared__ cuco::pair<probe_type, value_type> buffers[num_flushing_tiles][buffer_size];
     __shared__ probe_type probe_buffers[num_flushing_tiles][buffer_size];
     __shared__ value_type match_buffers[num_flushing_tiles][buffer_size];
-    size_type num_matches = 0;
+    __shared__ uint32_t match_counters[num_flushing_tiles];
+    __align__(16) __shared__ window_type windows[num_probing_tiles * probing_tile_size];
+    //__shared__ cuda::atomic<uint32_t, cuda::thread_scope_block>
+    // match_counters[num_flushing_tiles];
+    //__shared__ window_type windows[BlockSize];
 
-    auto flush_buffers = [&](cg::coalesced_group const& tile) {
-      auto const rank = tile.thread_rank();
-
+    // reset counter
 #if defined(CUCO_HAS_CG_INVOKE_ONE)
-      auto const offset = cg::invoke_one_broadcast(tile, [&]() {
-        return atomic_counter.fetch_add(num_matches, cuda::std::memory_order_relaxed);
-      });
+    cg::invoke_one(flushing_tile, [&]() {
+      // new (&match_counters[flushing_tile_id]) cuda::atomic<uint32_t, cuda::thread_scope_block>{};
+      match_counters[flushing_tile_id] = 0;
+    });
 #else
-      size_type offset;
-      if (rank == 0) {
-        offset = atomic_counter.fetch_add(num_matches, cuda::std::memory_order_relaxed);
-      }
-      offset = tile.shfl(offset, 0);
+    if (flushing_tile.thread_rank() == 0) {
+      // new (&match_counters[flushing_tile_id]) cuda::atomic<uint32_t, cuda::thread_scope_block>{};
+      match_counters[flushing_tile_id] = 0;
+    }
 #endif
+    // flushing_tile.sync(); // .any already comes with a sync
 
-      // flush_buffers
-      for (size_type i = rank; i < num_matches; i += tile.size()) {
-        *(output_probe + offset + i) = probe_buffers[flushing_tile_id][i];
-        *(output_match + offset + i) = match_buffers[flushing_tile_id][i];
-      }
-    };
+    cuda::atomic_ref<uint32_t, cuda::thread_scope_block> counter{match_counters[flushing_tile_id]};
+    do {
+      last = flushing_tile.all(idx >= n);
 
-    while (flushing_tile.any(idx < n)) {
-      bool active_flag = idx < n;
+      bool const active_flag = (idx < n);
       auto const active_flushing_tile =
         cg::binary_partition<flushing_tile_size>(flushing_tile, active_flag);
 
       if (active_flag) {
         // perform probing
         // make sure the flushing_tile is converged at this point to get a coalesced load
-        auto const& probe = *(input_probe + idx);
+        auto const& probe = *(input_probe + idx);  // TODO load instead of ref
         auto probing_iter =
           this->probing_scheme_(probing_tile, probe, this->storage_ref_.window_extent());
-        bool empty_found                      = false;
-        bool match_found                      = false;
-        [[maybe_unused]] bool found_any_match = false;  // only needed if `IsOuter == true`
+        bool empty_found = false;
+        bool match_found = false;
+        bool running     = true;
 
-        while (true) {
-          // TODO atomic_ref::load if insert operator is present
-          auto const window_slots = this->storage_ref_[*probing_iter];
+        // memcpy_async first window
+        size_type base_probing_idx = (probing_tile.thread_rank() == 0) ? *probing_iter : 0;
+        base_probing_idx           = probing_tile.shfl(base_probing_idx, 0);
+        cg::memcpy_async(probing_tile,
+                         windows + (probing_tile_id * probing_tile_size),
+                         this->storage_ref_.data() + base_probing_idx,
+                         probing_tile_size * sizeof(window_type));
 
-          for (int32_t i = 0; i < window_size; ++i) {
-            if (not empty_found) {
-              // inspect slot content
-              switch (this->predicate_.operator()<is_insert::NO>(
-                probe, this->extract_key(window_slots[i]))) {
-                case detail::equal_result::EMPTY: {
-                  empty_found = true;
-                  break;
-                }
-                case detail::equal_result::EQUAL: {
-                  match_found = true;
-                  break;
-                }
-                default: {
-                  break;
+        while (running) {
+          uint32_t match_mask = 0;  // TODO static assert window_size <= 32
+
+          if (not empty_found) {
+            // TODO atomic_ref::load if insert operator is present
+            // auto const window_slots = this->storage_ref_[*probing_iter];
+            // windows[threadIdx.x] = this->storage_ref_[*probing_iter];
+            // wati memcpy_async window
+            cg::wait(probing_tile);
+            for (uint32_t i = 0; i < window_size; ++i) {  // this should be unrolled automatically
+              if (not empty_found) {
+                // inspect slot content
+                switch (this->predicate_.operator()<is_insert::NO>(
+                  probe,
+                  this->extract_key(windows[probing_tile_id * probing_tile_size +
+                                            probing_tile.thread_rank()][i]))) {
+                  case detail::equal_result::EMPTY: {
+                    empty_found = true;
+                    break;
+                  }
+                  case detail::equal_result::EQUAL: {
+                    match_found = true;
+                    match_mask |= 1ul << i;
+                    break;
+                  }
+                  default: {
+                    break;
+                  }
                 }
               }
             }
 
-            if (active_flushing_tile.any(match_found)) {
-              auto const matching_tile = cg::binary_partition(active_flushing_tile, match_found);
-              // stage matches in shmem buffer
-              if (match_found) {
-                probe_buffers[flushing_tile_id][num_matches + matching_tile.thread_rank()] = probe;
-                match_buffers[flushing_tile_id][num_matches + matching_tile.thread_rank()] =
-                  window_slots[i];
-              }
+            uint32_t const thread_num_matches = cuda::std::popcount(match_mask);
+            // uint32_t const thread_offset = cg::exclusive_scan_update(probing_tile,
+            // match_counters[flushing_tile_id], thread_num_matches); // active_flushing_tile?
+            uint32_t const thread_offset = cg::exclusive_scan_update(
+              probing_tile, counter, thread_num_matches);  // active_flushing_tile?
 
-              // add number of new matches to the buffer counter
-              num_matches += (match_found) ? matching_tile.size()
-                                           : active_flushing_tile.size() - matching_tile.size();
-            }
-
-            if constexpr (IsOuter) {
-              if (not found_any_match /*yet*/ and probing_tile.any(match_found) /*now*/) {
-                found_any_match = true;
+            // store partial result in shmem
+            uint32_t j = 0;
+            for (uint32_t i = 0; j < thread_num_matches; ++i) {
+              if (match_mask & (1ul << i)) {
+                // buffers[flushing_tile_id][thread_offset + j] = {probe, window_slots[i]};
+                probe_buffers[flushing_tile_id][thread_offset + j] = probe;
+                match_buffers[flushing_tile_id][thread_offset + j] =
+                  windows[probing_tile_id * probing_tile_size + probing_tile.thread_rank()][i];
+                j++;
               }
             }
-
-            // reset flag for next iteration
-            match_found = false;
           }
+
+          // check if the current probing tile has finished its work
           empty_found = probing_tile.any(empty_found);
 
+          // if not empty_found incprement probing iter and launch next memcpy async
+          if (not empty_found) {
+            ++probing_iter;
+            base_probing_idx = (probing_tile.thread_rank() == 0) ? *probing_iter : 0;
+            base_probing_idx = probing_tile.shfl(base_probing_idx, 0);
+            cg::memcpy_async(probing_tile,
+                             windows + (probing_tile_id * probing_tile_size),
+                             this->storage_ref_.data() + base_probing_idx,
+                             probing_tile_size * sizeof(window_type));
+          }
+
           // check if all probing tiles have finished their work
-          bool const finished = active_flushing_tile.all(empty_found);
+          running = not active_flushing_tile.all(empty_found);  // implicit sync
 
           if constexpr (IsOuter) {
-            if (finished) {
-              bool const writes_sentinel =
-                ((probing_tile.thread_rank() == 0) and not found_any_match);
-
-              auto const sentinel_writers =
-                cg::binary_partition(active_flushing_tile, writes_sentinel);
-              if (writes_sentinel) {
-                auto const rank = sentinel_writers.thread_rank();
-                probe_buffers[flushing_tile_id][num_matches + rank] = probe;
-                match_buffers[flushing_tile_id][num_matches + rank] = this->empty_slot_sentinel();
-              }
-              // add number of new matches to the buffer counter
-              num_matches += (writes_sentinel)
-                               ? sentinel_writers.size()
-                               : active_flushing_tile.size() - sentinel_writers.size();
-            }
-            //             if (finished and not found_any_match) {
+            //             if (not running and not probing_tile.any(match_found)) {
             // #if defined(CUCO_HAS_CG_INVOKE_ONE)
             //               cg::invoke_one(probing_tile, [&]() {
-            //                 probe_buffers[flushing_tile_id][num_matches] = probe;
-            //                 probe_buffers[flushing_tile_id][num_matches] =
+            //                 auto const offset = match_counters[flushing_tile_id].fetch_add(1,
+            //                 cuda::memory_order_relaxed); probe_buffers[flushing_tile_id][offset]
+            //                 = probe; match_buffers[flushing_tile_id][offset] =
             //                 this->empty_slot_sentinel();
             //               });
             // #else
             //               if (probing_tile.thread_rank() == 0) {
-            //                 probe_buffers[flushing_tile_id][num_matches] = probe;
-            //                 probe_buffers[flushing_tile_id][num_matches] =
+            //                 auto const offset = match_counters[flushing_tile_id].fetch_add(1,
+            //                 cuda::memory_order_relaxed); probe_buffers[flushing_tile_id][offset]
+            //                 = probe; match_buffers[flushing_tile_id][offset] =
             //                 this->empty_slot_sentinel();
             //               }
             // #endif
-            //               num_matches++;  // not really a match but a sentinel in the buffer
+            //               active_flushing_tile.sync();
             //             }
           }
 
-          // if the buffer has not enough empty slots for the next iteration
-          if (num_matches > (buffer_size - max_matches_per_step)) {
-            flush_buffers(active_flushing_tile);
-
-            // reset buffer counter
-            num_matches = 0;
+#if defined(CUCO_HAS_CG_INVOKE_ONE)
+          auto const tile_num_matches = cg::invoke_one_broadcast(active_flushing_tile, [&]() {
+            // return match_counters[flushing_tile_id].load(cuda::memory_order_relaxed);
+            return match_counters[flushing_tile_id];
+          });
+#else
+          uint32_t tile_num_matches = 0;
+          if (active_flushing_tile.thread_rank() == 0) {
+            // offset = match_counters[flushing_tile_id].fetch_add(matching_tile.size(),
+            // cuda::std::memory_order_relaxed);
+            //  tile_num_matches =
+            //  match_counters[flushing_tile_id].load(cuda::memory_order_relaxed);
+            return match_counters[flushing_tile_id];
           }
+          tile_num_matches = active_flushing_tile.shfl(tile_num_matches, 0);
+#endif
+          // sync tile?
 
-          // the entire flushing tile has finished its work
-          if (finished) { break; }
+          // flush buffers and reset counter if neccessary
+          if (last or (tile_num_matches > (buffer_size - max_matches_per_step))) {
+            auto const rank = active_flushing_tile.thread_rank();
 
+#if defined(CUCO_HAS_CG_INVOKE_ONE)
+            auto const tile_offset = cg::invoke_one_broadcast(active_flushing_tile, [&]() {
+              // match_counters[flushing_tile_id].store(0, cuda::memory_order_relaxed);
+              match_counters[flushing_tile_id] = 0;
+              return atomic_counter.fetch_add(tile_num_matches, cuda::std::memory_order_relaxed);
+            });
+#else
+            size_type global_offset = 0;
+            if (rank == 0) {
+              // match_counters[flushing_tile_id].store(0, cuda::memory_order_relaxed);
+              match_counters[flushing_tile_id] = 0;
+              tile_offset =
+                atomic_counter.fetch_add(tile_num_matches, cuda::std::memory_order_relaxed);
+            }
+            tile_offset = active_flushing_tile.shfl(tile_offset, 0);
+#endif
+
+            for (uint32_t i = rank; i < tile_num_matches; i += active_flushing_tile.size()) {
+              // *(output_probe + tile_offset + i) = buffers[flushing_tile_id][i].first;
+              // *(output_match + tile_offset + i) = buffers[flushing_tile_id][i].second;
+              *(output_probe + tile_offset + i) = probe_buffers[flushing_tile_id][i];
+              *(output_match + tile_offset + i) = match_buffers[flushing_tile_id][i];
+            }
+            // active_flushing_tile.sync();
+          }
           // onto the next probing window
-          ++probing_iter;
-        }
-
-        // entire flusing_tile has finished; flush remaining elements
-        if (num_matches != 0 and active_flushing_tile.all((idx + stride) >= n)) {
-          flush_buffers(active_flushing_tile);
+          //++probing_iter;
         }
       }
-
       // onto the next key
       idx += stride;
-    }
+    } while (not last);
+    //     flushing_tile.sync();
+
+    // #if defined(CUCO_HAS_CG_INVOKE_ONE)
+    //     auto const tile_num_matches = cg::invoke_one_broadcast(flushing_tile, [&]() {
+    //       return match_counters[flushing_tile_id].load(cuda::memory_order_relaxed);
+    //     });
+    // #else
+    //     uint32_t tile_num_matches = 0;
+    //     if (flushing_tile.thread_rank() == 0) {
+    //       tile_num_matches = match_counters[flushing_tile_id].load(cuda::memory_order_relaxed);
+    //     }
+    //     tile_num_matches = flushing_tile.shfl(tile_num_matches, 0);
+    // #endif
+    //     // flush any remaining elements
+    //     if (tile_num_matches != 0) {
+    //       auto const rank = flushing_tile.thread_rank();
+
+    // #if defined(CUCO_HAS_CG_INVOKE_ONE)
+    //       auto const tile_offset = cg::invoke_one_broadcast(flushing_tile, [&]() {
+    //         match_counters[flushing_tile_id].store(0, cuda::memory_order_relaxed);
+    //         return atomic_counter.fetch_add(tile_num_matches, cuda::std::memory_order_relaxed);
+    //       });
+    // #else
+    //       size_type global_offset = 0;
+    //       if (rank == 0) {
+    //         tile_offset = atomic_counter.fetch_add(tile_num_matches,
+    //         cuda::std::memory_order_relaxed);
+    //       }
+    //       tile_offset = flushing_tile.shfl(tile_offset, 0);
+    // #endif
+
+    //       for (uint32_t i = rank; i < tile_num_matches; i += flushing_tile.size()) {
+    //         *(output_probe + tile_offset + i) = probe_buffers[flushing_tile_id][i];
+    //         *(output_match + tile_offset + i) = match_buffers[flushing_tile_id][i];
+    //       }
+    //     }
   }
 
   /**
