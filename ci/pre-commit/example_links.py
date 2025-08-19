@@ -21,7 +21,8 @@ def write_file(file_path, data):
 
 def create_compiler_explorer_url(file_path, COMPILER_ID, COMPILER_FLAGS):
     source_code = open_file(file_path)
-    # Prepare the JSON payload
+    
+    # Prepare the JSON payload with minimal structure to reduce size
     payload = {
         "sessions": [
             {
@@ -48,25 +49,56 @@ def create_compiler_explorer_url(file_path, COMPILER_ID, COMPILER_FLAGS):
         ]
     }
 
-    # Convert the payload to JSON
+    # Convert the payload to JSON with minimal whitespace
     config_json = json.dumps(payload, separators=(',', ':'))
+    
+    # Check if the payload is too large before compression
+    if len(config_json.encode('utf-8')) > 65536:  # 64KB limit
+        print(f"Warning: {file_path} source code is very large, URL may be too long")
 
-    # Compress the JSON using zlib (deflate)
-    compressed = zlib.compress(config_json.encode('utf-8'))
+    # Compress the JSON using zlib with maximum compression
+    compressed = zlib.compress(config_json.encode('utf-8'), level=9)
 
-    # Base64 encode the compressed data
+    # Base64 encode the compressed data using URL-safe encoding
     encoded = base64.urlsafe_b64encode(compressed).decode('utf-8')
+
+    # Remove padding characters to make URL shorter
+    encoded = encoded.rstrip('=')
 
     # Replace problematic unicode characters
     # As per the documentation, map characters in the range \u007F-\uFFFF
-    encoded = ''.join(
+    encoded_fixed = ''.join(
         c if '\u0000' <= c <= '\u007F' else '\\u{:04x}'.format(ord(c))
         for c in encoded
     )
 
     # Construct the final URL
-    url = f'https://godbolt.org/clientstate/{encoded}'
-
+    url = f'https://godbolt.org/clientstate/{encoded_fixed}'
+    
+    # Check if URL is too long and create a minimal fallback if needed
+    if len(url) > 2048:
+        print(f"Warning: URL for {file_path} is {len(url)} characters, creating minimal fallback")
+        
+        # Create a minimal payload with just essential information
+        minimal_payload = {
+            "sessions": [{
+                "id": 1,
+                "language": "cuda",
+                "source": "// Full source code too large for URL\n// Please view the source file directly",
+                "compilers": [{
+                    "id": COMPILER_ID,
+                    "options": COMPILER_FLAGS
+                }]
+            }]
+        }
+        
+        minimal_json = json.dumps(minimal_payload, separators=(',', ':'))
+        minimal_compressed = zlib.compress(minimal_json.encode('utf-8'), level=9)
+        minimal_encoded = base64.urlsafe_b64encode(minimal_compressed).decode('utf-8').rstrip('=')
+        
+        url = f'https://godbolt.org/clientstate/{minimal_encoded}'
+        print(f"Fallback URL for {file_path} is {len(url)} characters")
+        
     return url
 
 def update_readme_with_urls(readme_path, url_table, args):
