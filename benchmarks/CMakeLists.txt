@@ -16,6 +16,12 @@
 cmake_minimum_required(VERSION 3.23.1 FATAL_ERROR)
 
 ###################################################################################################
+# - fetch warpcore --------------------------------------------------------------------------------
+###################################################################################################
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/thirdparty/get_warpcore.cmake)
+
+###################################################################################################
 ### compiler function #############################################################################
 ###################################################################################################
 
@@ -37,6 +43,10 @@ function(ConfigureBench BENCH_NAME)
                                         nvbench::main
                                         pthread
                                         cuco)
+    # Link warpcore if available
+    if(TARGET warpcore)
+        target_link_libraries(${BENCH_NAME} PRIVATE warpcore)
+    endif()
 endfunction(ConfigureBench)
 
 ###################################################################################################
@@ -104,6 +114,16 @@ ConfigureBench(HYPERLOGLOG_BENCH
 ConfigureBench(BLOOM_FILTER_BENCH
   bloom_filter/add_bench.cu
   bloom_filter/contains_bench.cu)
+
+###################################################################################################
+# - warpcore bloom_filter benchmarks --------------------------------------------------------------
+if(TARGET warpcore)
+  ConfigureBench(WARPCORE_BLOOM_FILTER_BENCH
+    bloom_filter/warpcore_bench.cu)
+  # Warpcore uses OpenMP pragmas that we don't need in CUDA compilation
+  # Add flag to ignore unknown pragmas to avoid compilation errors
+  target_compile_options(WARPCORE_BLOOM_FILTER_BENCH PRIVATE --compiler-options=-Wno-unknown-pragmas)
+endif()
 
 ###################################################################################################
 # - roaring_bitmap benchmarks ---------------------------------------------------------------------
