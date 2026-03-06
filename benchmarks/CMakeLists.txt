@@ -56,7 +56,8 @@ ConfigureBench(STATIC_MAP_BENCH
   static_map/find_bench.cu
   static_map/contains_bench.cu
   static_map/erase_bench.cu
-  static_map/insert_or_apply_bench.cu)
+  static_map/insert_or_apply_bench.cu
+  static_map/batched_aggregation_bench.cu)
 
 ###################################################################################################
 # - static_multiset benchmarks --------------------------------------------------------------------
