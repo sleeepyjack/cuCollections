@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021-2025, NVIDIA CORPORATION.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -347,6 +347,82 @@ class key_generator {
   void generate(Dist dist, OutputIt out_begin, OutputIt out_end, cudaStream_t stream)
   {
     generate(dist, out_begin, out_end, thrust::cuda::par_nosync.on(stream));
+  }
+
+  /**
+   * @brief Generates a sequence of random keys of explicit type `KeyT`.
+   *
+   * This overload lets the caller control the generated key type, even if the output iterator's
+   * value_type is different (e.g., transform_output_iterator writing pairs).
+   *
+   * @tparam KeyT Generated key type
+   * @tparam Dist Key distribution type
+   * @tparam OutputIt Output iterator
+   * @tparam ExecPolicy Thrust execution policy
+   * @tparam Enable SFINAE helper
+   *
+   * @param dist Random distribution to use
+   * @param out_begin Start of the output sequence
+   * @param out_end End of the output sequence
+   * @param exec_policy Thrust execution policy this operation will be executed with
+   */
+  template <typename KeyT,
+            typename Dist,
+            typename OutputIt,
+            typename ExecPolicy,
+            typename Enable = std::enable_if_t<thrust::is_execution_policy<ExecPolicy>::value>>
+  void generate(Dist dist, OutputIt out_begin, OutputIt out_end, ExecPolicy exec_policy)
+  {
+    if constexpr (std::is_same_v<Dist, distribution::unique>) {
+      thrust::sequence(exec_policy, out_begin, out_end, KeyT{0});
+      thrust::shuffle(exec_policy, out_begin, out_end, this->rng_);
+    } else if constexpr (std::is_same_v<Dist, distribution::uniform>) {
+      size_t num_keys = cuda::std::distance(out_begin, out_end);
+      size_t seed     = this->rng_();
+
+      thrust::transform(exec_policy,
+                        thrust::make_counting_iterator<size_t>(0),
+                        thrust::make_counting_iterator<size_t>(num_keys),
+                        out_begin,
+                        detail::generate_uniform_fn<KeyT, Dist, RNG>{num_keys, dist, seed});
+    } else if constexpr (std::is_same_v<Dist, distribution::gaussian>) {
+      size_t num_keys = cuda::std::distance(out_begin, out_end);
+
+      thrust::counting_iterator<size_t> seq(this->rng_());
+
+      thrust::transform(exec_policy,
+                        seq,
+                        seq + num_keys,
+                        out_begin,
+                        detail::generate_gaussian_fn<KeyT, Dist, RNG>{num_keys, dist});
+    } else {
+      CUCO_FAIL("Unexpected distribution type");
+    }
+  }
+
+  /**
+   * @brief Overload of 'generate' which automatically selects a suitable execution policy
+   * for the explicit key type overload.
+   */
+  template <typename KeyT, typename Dist, typename OutputIt>
+  void generate(Dist dist, OutputIt out_begin, OutputIt out_end)
+  {
+    using thrust::system::detail::generic::select_system;
+
+    typedef typename thrust::iterator_system<OutputIt>::type System;
+    System system;
+
+    generate<KeyT>(dist, out_begin, out_end, select_system(system));
+  }
+
+  /**
+   * @brief Overload of 'generate' which uses 'thrust::cuda::par_nosync' execution policy on CUDA
+   * stream 'stream' for the explicit key type overload.
+   */
+  template <typename KeyT, typename Dist, typename OutputIt>
+  void generate(Dist dist, OutputIt out_begin, OutputIt out_end, cudaStream_t stream)
+  {
+    generate<KeyT>(dist, out_begin, out_end, thrust::cuda::par_nosync.on(stream));
   }
 
   /**
