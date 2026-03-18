@@ -202,22 +202,22 @@ NVBENCH_BENCH_TYPES(batched_aggregation,
   .add_int64_axis("Cardinality", {1<<0, 1<<1, 1<<2, 1<<3, 1<<4, 1<<5, 1<<6, 1<<7, (1<<8) - 1})
   .add_int64_axis("NumStreams", {8});
 
-// NVBENCH_BENCH_TYPES(batched_aggregation,
-//                     NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint16_t>,
-//                                       nvbench::type_list<nvbench::float64_t>))
-//   .set_name("static_map_batched_aggregation_uniform_uint16")
-//   .set_type_axes_names({"Key", "Value"})
-//   .add_int64_axis("NumInputs", {1'000'000'000})
-//   .add_int64_axis("BatchSize", {100'000'000})
-//   .add_int64_axis("Cardinality", {1<<9, 1<<10, 1<<11, 1<<12, 1<<13, 1<<14, 1<<15, (1<<16) - 1})
-//   .add_int64_axis("NumStreams", {8});
+NVBENCH_BENCH_TYPES(batched_aggregation,
+                    NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint16_t>,
+                                      nvbench::type_list<nvbench::float64_t>))
+  .set_name("static_map_batched_aggregation_uniform_uint16")
+  .set_type_axes_names({"Key", "Value"})
+  .add_int64_axis("NumInputs", {1'000'000'000})
+  .add_int64_axis("BatchSize", {100'000'000})
+  .add_int64_axis("Cardinality", {1<<9, 1<<10, 1<<11, 1<<12, 1<<13, 1<<14, 1<<15, (1<<16) - 1})
+  .add_int64_axis("NumStreams", {8});
 
-// NVBENCH_BENCH_TYPES(batched_aggregation,
-//                     NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint32_t>,
-//                                       nvbench::type_list<nvbench::float64_t>))
-//   .set_name("static_map_batched_aggregation_uniform_uint32")
-//   .set_type_axes_names({"Key", "Value"})
-//   .add_int64_axis("NumInputs", {1'000'000'000})
-//   .add_int64_axis("BatchSize", {100'000'000})
-//   .add_int64_axis("Cardinality", {1<<17, 1<<18, 1<<19, 1<<20, 1<<21, 1<<22, 1<<23, 1<<24})
-//   .add_int64_axis("NumStreams", {8});
+NVBENCH_BENCH_TYPES(batched_aggregation,
+                    NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint32_t>,
+                                      nvbench::type_list<nvbench::float64_t>))
+  .set_name("static_map_batched_aggregation_uniform_uint32")
+  .set_type_axes_names({"Key", "Value"})
+  .add_int64_axis("NumInputs", {1'000'000'000})
+  .add_int64_axis("BatchSize", {100'000'000})
+  .add_int64_axis("Cardinality", {1<<17, 1<<18, 1<<19, 1<<20, 1<<21, 1<<22, 1<<23, 1<<24})
+  .add_int64_axis("NumStreams", {8});
