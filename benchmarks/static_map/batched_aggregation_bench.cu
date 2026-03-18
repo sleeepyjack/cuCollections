@@ -40,6 +40,28 @@
 #include <limits>
 #include <vector>
 
+#include "nvtx3/nvToolsExt.h"
+
+CUCO_DECLARE_BITWISE_COMPARABLE(nvbench::float64_t)
+
+const uint32_t colors[] = { 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffff00ff, 0xff00ffff, 0xffff0000, 0xffffffff };
+const int num_colors = sizeof(colors)/sizeof(uint32_t);
+
+#define PUSH_RANGE(name,cid) { \
+    int color_id = cid; \
+    color_id = color_id%num_colors;\
+    nvtxEventAttributes_t eventAttrib = {}; \
+    eventAttrib.version = NVTX_VERSION; \
+    eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE; \
+    eventAttrib.colorType = NVTX_COLOR_ARGB; \
+    eventAttrib.color = colors[color_id]; \
+    eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII; \
+    eventAttrib.message.ascii = name; \
+    nvtxRangePushEx(&eventAttrib); \
+}
+#define POP_RANGE nvtxRangePop();
+
+
 using namespace cuco::benchmark;  // defaults, dist_from_state
 using namespace cuco::utility;    // key_generator, distribution
 
@@ -107,6 +129,11 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
   }
 
   // Timed region: batch uploads + insert_or_apply + retrieve_all.
+  std::string rangeName = "aggregation: NumInputs=" + std::to_string(num_inputs) +
+                          ", BatchSize=" + std::to_string(batch_size) +
+                          ", Cardinality=" + std::to_string(cardinality) +
+                          ", NumStreams=" + std::to_string(num_streams);
+  PUSH_RANGE(rangeName.c_str(), 0)
   state.exec(
     nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch& launch, auto& timer) {
       timer.start();
@@ -151,6 +178,8 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
       map.retrieve_all(result_keys, result_values, {launch.get_stream()});
       timer.stop();
 
+      POP_RANGE
+
       // Cleanup for next measurement.
       map.clear();
       CUCO_CUDA_TRY(cudaFreeAsync(result_keys, launch.get_stream()));
@@ -164,11 +193,31 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
 }
 
 NVBENCH_BENCH_TYPES(batched_aggregation,
-                    NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::int32_t>,
-                                      nvbench::type_list<nvbench::int32_t>))
-  .set_name("static_map_batched_aggregation_uniform")
+                    NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint8_t>,
+                                      nvbench::type_list<nvbench::float64_t>))
+  .set_name("static_map_batched_aggregation_uniform_uint8")
   .set_type_axes_names({"Key", "Value"})
   .add_int64_axis("NumInputs", {1'000'000'000})
-  .add_int64_axis("BatchSize", {25'000'000, 50'000'000})
-  .add_int64_axis("Cardinality", {10'000, 100'000, 1'000'000, 10'000'000, 100'000'000, 1'000'000'000})
+  .add_int64_axis("BatchSize", {100'000'000})
+  .add_int64_axis("Cardinality", {1<<0, 1<<1, 1<<2, 1<<3, 1<<4, 1<<5, 1<<6, 1<<7, (1<<8) - 1})
   .add_int64_axis("NumStreams", {8});
+
+// NVBENCH_BENCH_TYPES(batched_aggregation,
+//                     NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint16_t>,
+//                                       nvbench::type_list<nvbench::float64_t>))
+//   .set_name("static_map_batched_aggregation_uniform_uint16")
+//   .set_type_axes_names({"Key", "Value"})
+//   .add_int64_axis("NumInputs", {1'000'000'000})
+//   .add_int64_axis("BatchSize", {100'000'000})
+//   .add_int64_axis("Cardinality", {1<<9, 1<<10, 1<<11, 1<<12, 1<<13, 1<<14, 1<<15, (1<<16) - 1})
+//   .add_int64_axis("NumStreams", {8});
+
+// NVBENCH_BENCH_TYPES(batched_aggregation,
+//                     NVBENCH_TYPE_AXES(nvbench::type_list<nvbench::uint32_t>,
+//                                       nvbench::type_list<nvbench::float64_t>))
+//   .set_name("static_map_batched_aggregation_uniform_uint32")
+//   .set_type_axes_names({"Key", "Value"})
+//   .add_int64_axis("NumInputs", {1'000'000'000})
+//   .add_int64_axis("BatchSize", {100'000'000})
+//   .add_int64_axis("Cardinality", {1<<17, 1<<18, 1<<19, 1<<20, 1<<21, 1<<22, 1<<23, 1<<24})
+//   .add_int64_axis("NumStreams", {8});
