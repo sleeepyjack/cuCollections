@@ -40,9 +40,8 @@
 #include <limits>
 #include <vector>
 
+#ifdef CUCO_ENABLE_NVTX
 #include "nvtx3/nvToolsExt.h"
-
-CUCO_DECLARE_BITWISE_COMPARABLE(nvbench::float64_t)
 
 const uint32_t colors[] = { 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffff00ff, 0xff00ffff, 0xffff0000, 0xffffffff };
 const int num_colors = sizeof(colors)/sizeof(uint32_t);
@@ -60,6 +59,12 @@ const int num_colors = sizeof(colors)/sizeof(uint32_t);
     nvtxRangePushEx(&eventAttrib); \
 }
 #define POP_RANGE nvtxRangePop();
+#else
+#define PUSH_RANGE(name,cid)
+#define POP_RANGE
+#endif
+
+CUCO_DECLARE_BITWISE_COMPARABLE(nvbench::float64_t)
 
 
 using namespace cuco::benchmark;  // defaults, dist_from_state
