@@ -73,8 +73,6 @@ using namespace cuco::utility;    // key_generator, distribution
 template <typename Key, typename Value>
 void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
 {
-  using pair_type = cuco::pair<Key, Value>;
-
   std::size_t const num_inputs  = state.get_int64("NumInputs");
   std::size_t const batch_size  = state.get_int64("BatchSize");
   std::size_t const cardinality = state.get_int64("Cardinality");
@@ -94,22 +92,26 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
   // Number of virtual batches processed across all streams.
   std::size_t const num_batches = cuco::detail::int_div_ceil(num_inputs, batch_size);
 
-  // Pinned host storage for input pairs.
-  pair_type* host_pairs = nullptr;
-  CUCO_CUDA_TRY(cudaMallocHost(&host_pairs, num_inputs * sizeof(pair_type)));
+  // Pinned host storage: separate key and value arrays (SoA) to avoid pair alignment padding.
+  Key* host_keys     = nullptr;
+  Value* host_values = nullptr;
+  CUCO_CUDA_TRY(cudaMallocHost(&host_keys, num_inputs * sizeof(Key)));
+  CUCO_CUDA_TRY(cudaMallocHost(&host_values, num_inputs * sizeof(Value)));
 
+  // Generate keys on the GPU into pinned host memory, fill values with 1.
   [[maybe_unused]] key_generator gen{};
-  auto device_pairs = thrust::device_pointer_cast(host_pairs);
-  auto out_iter     = thrust::make_transform_output_iterator(
-    device_pairs, [] __host__ __device__(Key key) { return pair_type{key, Value{1}}; });
-  // Generate keys on the GPU and materialize (key, 1) pairs in pinned host memory.
   gen.generate<Key>(distribution::uniform{static_cast<int64_t>(multiplicity)},
-                    out_iter,
-                    out_iter + num_inputs,
+                    thrust::device_pointer_cast(host_keys),
+                    thrust::device_pointer_cast(host_keys) + num_inputs,
                     thrust::cuda::par);
+  thrust::fill(thrust::cuda::par,
+               thrust::device_pointer_cast(host_values),
+               thrust::device_pointer_cast(host_values) + num_inputs,
+               Value{1});
 
   state.add_element_count(num_inputs);
-  state.add_global_memory_reads<pair_type>(num_inputs, "InputSize");
+  // Report input bytes transferred: sizeof(Key) + sizeof(Value) per element.
+  state.add_global_memory_reads<cuda::std::byte>(num_inputs * (sizeof(Key) + sizeof(Value)), "InputSize");
 
   Key constexpr empty_key_sentinel     = std::numeric_limits<Key>::max();
   Value constexpr empty_value_sentinel = Value{0};  // use the neutral element for the reduction
@@ -126,12 +128,9 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
     CUCO_CUDA_TRY(cudaStreamCreate(&stream));
   }
 
-  // Per-stream staging buffers for batch uploads.
-  std::vector<thrust::device_vector<pair_type>> device_batches;
-  device_batches.reserve(num_streams);
-  for (std::size_t i = 0; i < num_streams; ++i) {
-    device_batches.emplace_back(batch_size);
-  }
+  // Per-stream staging buffers for batch uploads (SoA: separate key and value vectors).
+  std::vector<thrust::device_vector<Key>>   device_keys(num_streams, thrust::device_vector<Key>(batch_size));
+  std::vector<thrust::device_vector<Value>> device_values(num_streams, thrust::device_vector<Value>(batch_size));
 
   // Timed region: batch uploads + insert_or_apply + retrieve_all.
   std::string rangeName = "aggregation: NumInputs=" + std::to_string(num_inputs) +
@@ -144,22 +143,30 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
       timer.start();
       // Strided assignment: each stream handles every num_streams-th batch.
       for (std::size_t stream_id = 0; stream_id < num_streams; ++stream_id) {
-        auto& stream      = streams[stream_id];
-        auto& batch_pairs = device_batches[stream_id];
+        auto& stream       = streams[stream_id];
+        auto& batch_keys   = device_keys[stream_id];
+        auto& batch_values = device_values[stream_id];
+        auto batch_begin   = thrust::make_zip_iterator(
+          thrust::make_tuple(batch_keys.begin(), batch_values.begin()));
+          
         for (std::size_t batch = stream_id; batch < num_batches; batch += num_streams) {
           std::size_t const offset = batch * batch_size;
           std::size_t const count  = std::min(batch_size, num_inputs - offset);
 
-          // H2D copy of the next batch into the per-stream staging buffer.
-          CUCO_CUDA_TRY(cudaMemcpyAsync(thrust::raw_pointer_cast(batch_pairs.data()),
-                                        host_pairs + offset,
-                                        count * sizeof(pair_type),
+          // H2D copy of keys and values separately into per-stream staging buffers.
+          CUCO_CUDA_TRY(cudaMemcpyAsync(thrust::raw_pointer_cast(batch_keys.data()),
+                                        host_keys + offset,
+                                        count * sizeof(Key),
+                                        cudaMemcpyHostToDevice,
+                                        stream));
+          CUCO_CUDA_TRY(cudaMemcpyAsync(thrust::raw_pointer_cast(batch_values.data()),
+                                        host_values + offset,
+                                        count * sizeof(Value),
                                         cudaMemcpyHostToDevice,
                                         stream));
 
-          // Insert-or-apply for this batch on the stream.
-          map.insert_or_apply_async(batch_pairs.begin(),
-                                    batch_pairs.begin() + count,
+          map.insert_or_apply_async(batch_begin,
+                                    batch_begin + count,
                                     Value{0},
                                     cuco::reduce::plus{},
                                     cuda::stream_ref{stream});
@@ -194,7 +201,8 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
   for (auto& stream : streams) {
     CUCO_CUDA_TRY(cudaStreamDestroy(stream));
   }
-  CUCO_CUDA_TRY(cudaFreeHost(host_pairs));
+  CUCO_CUDA_TRY(cudaFreeHost(host_keys));
+  CUCO_CUDA_TRY(cudaFreeHost(host_values));
 }
 
 NVBENCH_BENCH_TYPES(batched_aggregation,
