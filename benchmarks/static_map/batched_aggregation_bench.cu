@@ -119,17 +119,20 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
   std::size_t const map_capacity = cardinality / 0.5;
 
   // Use identity hashing for small key types (u8/u16): keys map directly to slots with no
-  // collisions since capacity > cardinality, which is the intended use of identity_hash.
+  // collisions since capacity >= cardinality, which is the intended use of identity_hash.
   using ProbingScheme = cuda::std::conditional_t<
     sizeof(Key) <= 2,
     cuco::linear_probing<1, cuco::identity_hash<Key>>,
     cuco::linear_probing<4, cuco::xxhash_32<Key>>>;
 
-  // uint32_t extent is always safe for u8/u16 keys: max capacity is 2*(2^16-1) < 2^32.
-  // Use size_t for u32 and larger to accommodate higher cardinalities.
-  using Extent = cuda::std::conditional_t<sizeof(Key) <= 2,
-                                          cuco::extent<std::uint32_t>,
-                                          cuco::extent<std::size_t>>;
+  // For u8/u16: static extent sized to the full key domain (numeric_limits<Key>::max() slots).
+  // Every key maps to a unique slot with no collisions. The static size is baked into the type;
+  // the runtime map_capacity value passed to the constructor is ignored by the static extent.
+  // For u32+: dynamic extent with size_t to accommodate higher cardinalities.
+  using Extent = cuda::std::conditional_t<
+    sizeof(Key) <= 2,
+    cuco::extent<std::uint32_t, std::numeric_limits<Key>::max()>,
+    cuco::extent<std::size_t>>;
   cuco::static_map<Key, Value,
                    Extent,
                    cuda::thread_scope_device,
