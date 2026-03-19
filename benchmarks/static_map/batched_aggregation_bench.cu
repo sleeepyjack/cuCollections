@@ -70,6 +70,14 @@ CUCO_DECLARE_BITWISE_COMPARABLE(nvbench::float64_t)
 using namespace cuco::benchmark;  // defaults, dist_from_state
 using namespace cuco::utility;    // key_generator, distribution
 
+// Key equality functor for the no-collision identity-hash case (u8/u16).
+// With identity hash and capacity >= |key domain|, every non-sentinel slot holds exactly
+// the key that hashed to it, so any occupied slot encountered during a probe is a match.
+struct always_equal {
+  template <typename T>
+  __host__ __device__ constexpr bool operator()(T const&, T const&) const noexcept { return true; }
+};
+
 template <typename Key, typename Value>
 void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
 {
@@ -118,25 +126,29 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
   // Target ~50% occupancy based on requested cardinality.
   std::size_t const map_capacity = cardinality / 0.5;
 
-  // Use identity hashing for small key types (u8/u16): keys map directly to slots with no
-  // collisions since capacity >= cardinality, which is the intended use of identity_hash.
+  // Keys with at most 2 bytes have a small enough domain to use perfect hashing:
+  // identity hash with no collisions, static extent, and trivial key equality.
+  static constexpr bool use_perfect_hash = sizeof(Key) <= 2;
+
   using ProbingScheme = cuda::std::conditional_t<
-    sizeof(Key) <= 2,
+    use_perfect_hash,
     cuco::linear_probing<1, cuco::identity_hash<Key>>,
-    cuco::linear_probing<4, cuco::xxhash_32<Key>>>;
+    cuco::linear_probing<2, cuco::xxhash_32<Key>>>;
 
   // For u8/u16: static extent sized to the full key domain (numeric_limits<Key>::max() slots).
   // Every key maps to a unique slot with no collisions. The static size is baked into the type;
   // the runtime map_capacity value passed to the constructor is ignored by the static extent.
   // For u32+: dynamic extent with size_t to accommodate higher cardinalities.
   using Extent = cuda::std::conditional_t<
-    sizeof(Key) <= 2,
+    use_perfect_hash,
     cuco::extent<std::uint32_t, std::numeric_limits<Key>::max()>,
     cuco::extent<std::size_t>>;
+  using KeyEqual = cuda::std::conditional_t<use_perfect_hash, always_equal, cuda::std::equal_to<Key>>;
+
   cuco::static_map<Key, Value,
                    Extent,
                    cuda::thread_scope_device,
-                   cuda::std::equal_to<Key>,
+                   KeyEqual,
                    ProbingScheme> map{static_cast<typename Extent::value_type>(map_capacity),
                                      cuco::empty_key<Key>{empty_key_sentinel},
                                      cuco::empty_value<Value>{empty_value_sentinel}};
