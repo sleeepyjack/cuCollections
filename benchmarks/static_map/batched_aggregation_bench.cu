@@ -118,9 +118,25 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
   // Target ~50% occupancy based on requested cardinality.
   std::size_t const map_capacity = cardinality / 0.5;
 
-  cuco::static_map map{map_capacity,
-                       cuco::empty_key<Key>{empty_key_sentinel},
-                       cuco::empty_value<Value>{empty_value_sentinel}};
+  // Use identity hashing for small key types (u8/u16): keys map directly to slots with no
+  // collisions since capacity > cardinality, which is the intended use of identity_hash.
+  using ProbingScheme = cuda::std::conditional_t<
+    sizeof(Key) <= 2,
+    cuco::linear_probing<1, cuco::identity_hash<Key>>,
+    cuco::linear_probing<4, cuco::xxhash_32<Key>>>;
+
+  // uint32_t extent is always safe for u8/u16 keys: max capacity is 2*(2^16-1) < 2^32.
+  // Use size_t for u32 and larger to accommodate higher cardinalities.
+  using Extent = cuda::std::conditional_t<sizeof(Key) <= 2,
+                                          cuco::extent<std::uint32_t>,
+                                          cuco::extent<std::size_t>>;
+  cuco::static_map<Key, Value,
+                   Extent,
+                   cuda::thread_scope_device,
+                   cuda::std::equal_to<Key>,
+                   ProbingScheme> map{static_cast<typename Extent::value_type>(map_capacity),
+                                     cuco::empty_key<Key>{empty_key_sentinel},
+                                     cuco::empty_value<Value>{empty_value_sentinel}};
 
   // Create streams for strided batch processing.
   std::vector<cudaStream_t> streams(num_streams);
