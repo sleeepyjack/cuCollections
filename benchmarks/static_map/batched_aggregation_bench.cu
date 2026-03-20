@@ -40,6 +40,7 @@
 #include <limits>
 #include <vector>
 
+#define CUCO_ENABLE_NVTX
 #ifdef CUCO_ENABLE_NVTX
 #include "nvtx3/nvToolsExt.h"
 
@@ -168,9 +169,10 @@ void batched_aggregation(nvbench::state& state, nvbench::type_list<Key, Value>)
                           ", BatchSize=" + std::to_string(batch_size) +
                           ", Cardinality=" + std::to_string(cardinality) +
                           ", NumStreams=" + std::to_string(num_streams);
-  PUSH_RANGE(rangeName.c_str(), 0)
+
   state.exec(
     nvbench::exec_tag::sync | nvbench::exec_tag::timer, [&](nvbench::launch& launch, auto& timer) {
+      PUSH_RANGE(rangeName.c_str(), 0)
       timer.start();
       // Strided assignment: each stream handles every num_streams-th batch.
       for (std::size_t stream_id = 0; stream_id < num_streams; ++stream_id) {
