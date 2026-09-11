@@ -9,9 +9,10 @@
 #include <cuco/extent.cuh>
 #include <cuco/utility/allocator.hpp>
 
+#include <cuda/std/algorithm>
 #include <cuda/std/array>
-#include <cuda/std/bit>
 #include <cuda/std/functional>
+#include <cuda/std/numeric>
 #include <cuda/stream_ref>
 
 #include <cstddef>
@@ -29,15 +30,18 @@ namespace cuco {
  */
 template <typename T, int32_t BucketSize, typename Extent = cuco::extent<std::size_t>>
 class bucket_storage_ref {
+  static_assert(BucketSize > 0, "Bucket size must be positive");
+
  public:
   static constexpr int32_t bucket_size = BucketSize;        ///< Number of elements per bucket
-  static constexpr std::size_t max_vector_load_bytes = 16;  ///< Maximum vector load width in bytes
+  static constexpr std::size_t max_vector_load_bytes = 32;  ///< Maximum vector load width in bytes
 
   using bucket_type = cuda::std::array<T, BucketSize>;  ///< Slot bucket type
 
   static constexpr std::size_t alignment =
-    cuda::std::min(cuda::std::bit_ceil(sizeof(bucket_type)),
-                   max_vector_load_bytes);  ///< Required alignment in bytes
+    cuda::std::max(alignof(T),
+                   cuda::std::gcd(sizeof(T) * BucketSize,
+                                  max_vector_load_bytes));  ///< Required alignment in bytes
 
   using extent_type = Extent;                            ///< Storage extent type
   using size_type   = typename extent_type::value_type;  ///< Storage size type
@@ -45,6 +49,9 @@ class bucket_storage_ref {
 
   /**
    * @brief Constructor of slot storage ref.
+   *
+   * @note `slots` must be aligned to `alignment` bytes. This alignment is
+   * preserved at every bucket boundary, including for non-power-of-two buckets.
    *
    * @param size Number of slots
    * @param slots Pointer to the slots array
@@ -91,6 +98,10 @@ class bucket_storage_ref {
 
   /**
    * @brief Returns an array of slots (or a bucket) for a given index.
+   *
+   * @pre The complete range `[index, index + bucket_size)` is within the storage.
+   *
+   * @note `index` need not be a multiple of `bucket_size`.
    *
    * @param index Index of the slot
    * @return An array of slots
