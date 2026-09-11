@@ -11,6 +11,7 @@
 
 #include <cuda/std/algorithm>
 #include <cuda/std/array>
+#include <cuda/std/bit>
 #include <cuda/std/functional>
 #include <cuda/std/numeric>
 #include <cuda/stream_ref>
@@ -20,6 +21,16 @@
 #include <memory>
 
 namespace cuco {
+
+/**
+ * @brief Selects the alignment exposed when loading a bucket.
+ *
+ * Both policies return the complete bucket; the compiler chooses the load instructions.
+ */
+enum class bucket_load_policy {
+  FULL,        ///< Allow the full bucket alignment for wide loads.
+  FIRST_MATCH  ///< Favor incremental loads when consumption can stop within the bucket.
+};
 
 /**
  * @brief Non-owning array of slots storage reference type.
@@ -109,6 +120,21 @@ class bucket_storage_ref {
   [[nodiscard]] __device__ constexpr bucket_type operator[](size_type index) const noexcept;
 
   /**
+   * @brief Loads a bucket starting at a bucket-aligned slot index.
+   *
+   * Unlike `operator[]`, this access exposes the guaranteed bucket alignment to the compiler.
+   *
+   * @pre `index` is a multiple of `bucket_size`.
+   * @pre The complete range `[index, index + bucket_size)` is within the storage.
+   *
+   * @tparam Policy Bucket load policy
+   * @param index Index of the first slot in the bucket
+   * @return An array containing the bucket's slots
+   */
+  template <bucket_load_policy Policy = bucket_load_policy::FULL>
+  [[nodiscard]] __device__ constexpr bucket_type load_bucket(size_type index) const noexcept;
+
+  /**
    * @brief Gets the total number of slot buckets in the current storage.
    *
    * @return The total number of slot buckets
@@ -130,6 +156,10 @@ class bucket_storage_ref {
   [[nodiscard]] __host__ __device__ constexpr extent_type extent() const noexcept;
 
  private:
+  // Keep first-match loads incremental; full scans can use the wider storage alignment.
+  static constexpr auto first_match_load_alignment = cuda::std::max(
+    alignof(T), cuda::std::min(std::size_t{16}, cuda::std::bit_floor(sizeof(bucket_type) / 2)));
+
   extent_type extent_;  ///< Storage extent
   value_type* slots_;   ///< Pointer to the slots array
 };

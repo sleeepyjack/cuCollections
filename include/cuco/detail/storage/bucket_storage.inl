@@ -66,6 +66,26 @@ bucket_storage_ref<T, BucketSize, Extent>::operator[](size_type index) const noe
 }
 
 template <typename T, int BucketSize, typename Extent>
+template <bucket_load_policy Policy>
+__device__ constexpr bucket_storage_ref<T, BucketSize, Extent>::bucket_type
+bucket_storage_ref<T, BucketSize, Extent>::load_bucket(size_type index) const noexcept
+{
+  static_assert(Policy == bucket_load_policy::FULL || Policy == bucket_load_policy::FIRST_MATCH,
+                "Unsupported bucket load policy");
+  assert(index % bucket_size == 0);
+  assert(index <= capacity() && bucket_size <= capacity() - index);
+  constexpr auto load_alignment = cuda::std::min(
+    alignment,
+    Policy == bucket_load_policy::FIRST_MATCH ? first_match_load_alignment : max_vector_load_bytes);
+  if constexpr (load_alignment <= alignof(value_type)) {
+    return (*this)[index];
+  } else {
+    auto const* ptr = __builtin_assume_aligned(this->data() + index, load_alignment);
+    return *static_cast<bucket_type const*>(ptr);
+  }
+}
+
+template <typename T, int BucketSize, typename Extent>
 __host__ __device__ constexpr typename bucket_storage_ref<T, BucketSize, Extent>::size_type
 bucket_storage_ref<T, BucketSize, Extent>::num_buckets() const noexcept
 {

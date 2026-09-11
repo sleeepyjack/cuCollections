@@ -5,10 +5,10 @@
 
 #pragma once
 
+#include <cuco/bucket_storage.cuh>
 #include <cuco/detail/equal_wrapper.cuh>
 #include <cuco/detail/open_addressing/constraints.cuh>
 #include <cuco/detail/probing_scheme/probing_scheme_base.cuh>
-#include <cuco/detail/storage/load_bucket.cuh>
 #include <cuco/detail/utility/cuda.cuh>
 #include <cuco/detail/utils.hpp>
 #include <cuco/extent.cuh>
@@ -94,12 +94,27 @@ class open_addressing_ref_impl
   /// Determines if the container is a key/value or key-only store
   static constexpr auto has_payload = not cuda::std::is_same_v<Key, storage_value_type>;
 
-  // First-match probing can stop within a bucket. Keep its loads incremental;
-  // full-bucket scans below can use the storage's wider alignment.
-  static constexpr auto probe_load_alignment = cuda::std::max(
-    alignof(storage_value_type),
-    cuda::std::min(std::size_t{16},
-                   cuda::std::bit_floor(sizeof(typename StorageRef::bucket_type) / 2)));
+  /**
+   * @brief Selects aligned bucket access for native storage and preserves custom slot access.
+   *
+   * Probing schemes must produce bucket-aligned slot indices.
+   * @tparam Policy Bucket load policy
+   * @param index Slot index produced by the probing iterator
+   * @return The bucket at `index`
+   */
+  template <bucket_load_policy Policy>
+  __device__ typename StorageRef::bucket_type load_bucket(
+    typename StorageRef::size_type index) const noexcept
+  {
+    using native_storage_ref = bucket_storage_ref<storage_value_type,
+                                                  StorageRef::bucket_size,
+                                                  typename StorageRef::extent_type>;
+    if constexpr (cuda::std::is_same_v<StorageRef, native_storage_ref>) {
+      return storage_ref_.template load_bucket<Policy>(index);
+    } else {
+      return storage_ref_[index];
+    }
+  }
 
   /// Flag indicating whether duplicate keys are allowed or not
   static constexpr auto allows_duplicates = AllowsDuplicates;
@@ -817,7 +832,7 @@ class open_addressing_ref_impl
 
     while (true) {
       auto const bucket_slots =
-        detail::load_bucket<probe_load_alignment>(storage_ref_, *probing_iter, probing_scheme_);
+        this->template load_bucket<bucket_load_policy::FIRST_MATCH>(*probing_iter);
 
       auto const state = [&]() {
         auto res = detail::equal_result::UNEQUAL;
@@ -902,7 +917,7 @@ class open_addressing_ref_impl
 
     while (true) {
       auto const bucket_slots =
-        detail::load_bucket<probe_load_alignment>(storage_ref_, *probing_iter, probing_scheme_);
+        this->template load_bucket<bucket_load_policy::FIRST_MATCH>(*probing_iter);
 
       auto const [state, intra_bucket_index] = [&]() {
         bucket_probing_results result{detail::equal_result::UNEQUAL, -1};
@@ -1309,7 +1324,7 @@ class open_addressing_ref_impl
           if (running) {
             // TODO atomic_ref::load if insert operator is present
             auto const bucket_slots =
-              detail::load_bucket(storage_ref_, *probing_iter, probing_scheme_);
+              this->template load_bucket<bucket_load_policy::FULL>(*probing_iter);
 
             cuda::static_for<bucket_size>([&] __device__(auto i) {
               equals[i()] = false;
@@ -1430,7 +1445,7 @@ class open_addressing_ref_impl
 
     while (true) {
       // TODO atomic_ref::load if insert operator is present
-      auto const bucket_slots = detail::load_bucket(storage_ref_, *probing_iter, probing_scheme_);
+      auto const bucket_slots = this->template load_bucket<bucket_load_policy::FULL>(*probing_iter);
 
       bool should_return = false;
       cuda::static_for<bucket_size>([&] __device__(auto i) {
@@ -1487,7 +1502,7 @@ class open_addressing_ref_impl
 
     while (true) {
       // TODO atomic_ref::load if insert operator is present
-      auto const bucket_slots = detail::load_bucket(storage_ref_, *probing_iter, probing_scheme_);
+      auto const bucket_slots = this->template load_bucket<bucket_load_policy::FULL>(*probing_iter);
 
       for (cuda::std::int32_t i = 0; i < bucket_size and !empty; ++i) {
         switch (this->predicate_.template operator()<is_insert::NO>(
@@ -1553,7 +1568,7 @@ class open_addressing_ref_impl
 
     while (true) {
       // TODO atomic_ref::load if insert operator is present
-      auto const bucket_slots = detail::load_bucket(storage_ref_, *probing_iter, probing_scheme_);
+      auto const bucket_slots = this->template load_bucket<bucket_load_policy::FULL>(*probing_iter);
 
       for (cuda::std::int32_t i = 0; i < bucket_size and !empty; ++i) {
         switch (this->predicate_.template operator()<is_insert::NO>(
