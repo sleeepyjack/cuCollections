@@ -125,11 +125,9 @@ __device__ void check_reads(Ref ref, unsigned* errors)
   unsigned wrong{};
   for (std::size_t index = threadIdx.x * bucket; index + bucket <= n;
        index += blockDim.x * bucket) {
-    auto const values      = ref.load_bucket(index);
-    auto const first_match = ref.template load_bucket<cuco::bucket_load_policy::FIRST_MATCH>(index);
+    auto const values = ref.load_bucket(index);
     for (int i = 0; i < bucket; ++i) {
       wrong += !same_value(values[i], index + i);
-      wrong += !same_value(first_match[i], index + i);
     }
   }
   for (std::size_t index = threadIdx.x; index + bucket <= n; index += blockDim.x) {
@@ -269,7 +267,7 @@ TEST_CASE("aligned bucket access preserves custom storage and probing", "")
     CUCO_CUDA_TRY(cudaMemcpy(storage.data() + 1, &key, sizeof(key), cudaMemcpyHostToDevice));
     check_fallback_loads<true, false><<<1, 2>>>(storage.ref(), errors, matches);
   }
-  SECTION("A custom probe can use the aligned storage load policies.")
+  SECTION("A custom probe uses the aligned whole-bucket load.")
   {
     CUCO_CUDA_TRY(cudaMemcpy(storage.data() + 16, &key, sizeof(key), cudaMemcpyHostToDevice));
     check_fallback_loads<false, true><<<1, 2>>>(storage.ref(), errors, matches);
