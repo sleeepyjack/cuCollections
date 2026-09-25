@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this artifact, please cite it using the metadata below."
-title: "SC'26 IA^3 Artifact: Optimizing Bloom Filters on Modern GPUs"
+title: "Optimizing Bloom Filters on Modern GPUs: Artifact"
 type: software
 version: 1.0.1
 date-released: "2026-09-25"
@@ -38,3 +38,26 @@ keywords:
   - GPU
   - approximate membership query
   - artifact evaluation
+preferred-citation:
+  type: conference-paper
+  title: "Optimizing Bloom Filters on Modern GPUs"
+  authors:
+    - family-names: Jünger
+      given-names: Daniel
+      affiliation: NVIDIA Corporation
+    - family-names: Kristensen
+      given-names: Kevin
+      affiliation: NVIDIA Corporation
+    - family-names: Wang
+      given-names: Yunsong
+      affiliation: NVIDIA Corporation
+    - family-names: Yu
+      given-names: Xiangyao
+      affiliation: University of Wisconsin-Madison
+    - family-names: Schmidt
+      given-names: Bertil
+      affiliation: Johannes Gutenberg University
+  conference:
+    name: "SC'26 Workshop on Irregular Applications: Architectures and Algorithms (IA^3)"
+  status: in-press
+  year: 2026
