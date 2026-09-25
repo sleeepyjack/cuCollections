@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use this artifact, please cite it using the metadata below."
+title: "SC'26 IA^3 Artifact: Optimizing Bloom Filters on Modern GPUs"
+type: software
+version: 1.0.1
+date-released: "2026-09-25"
+authors:
+  - family-names: Jünger
+    given-names: Daniel
+    affiliation: NVIDIA Corporation
+  - family-names: Kristensen
+    given-names: Kevin
+    affiliation: NVIDIA Corporation
+  - family-names: Wang
+    given-names: Yunsong
+    affiliation: NVIDIA Corporation
+  - family-names: Yu
+    given-names: Xiangyao
+    affiliation: University of Wisconsin-Madison
+  - family-names: Schmidt
+    given-names: Bertil
+    affiliation: Johannes Gutenberg University
+abstract: >-
+  Artifact for the paper "Optimizing Bloom Filters on Modern GPUs." It
+  contains the GPU SBF and CSBF implementations, WarpCore and GPU CBF
+  baselines, correctness tests, a pinned container workflow, GUPS
+  measurements, and result summarization scripts.
+license: Apache-2.0
+repository-code: "https://github.com/NVIDIA/cuCollections"
+url: "https://github.com/NVIDIA/cuCollections/tree/bloom-filter-ia3-artifact"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.22948419
+    description: Zenodo concept DOI for all artifact versions
+keywords:
+  - Bloom filter
+  - CUDA
+  - GPU
+  - approximate membership query
+  - artifact evaluation

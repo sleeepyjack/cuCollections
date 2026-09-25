@@ -111,7 +111,7 @@ rapidsai/devcontainers:26.10-cpp-gcc14-cuda13.3-ubuntu24.04@sha256:cc412951e7384
 
 Artifact preparation requires:
 
-- A Linux x86-64 host.
+- A Linux host.
 - Docker.
 - Network access for the initial container and dependency downloads.
 - Approximately 10 GiB of free host storage.
@@ -301,6 +301,10 @@ The workflow accepts the following environment variables:
 - `CUDA_ARCHITECTURES`: CMake CUDA architecture value.
 - `JOBS`: parallel build jobs.
 - `DEVICE`: NVBench logical device ID; defaults to `0`.
+- `THROTTLE_THRESHOLD`: minimum percentage of the GPU's default clock rate
+  accepted by NVBench before waiting for clock recovery; defaults to `95`.
+- `THROTTLE_RECOVERY_DELAY`: seconds NVBench waits between clock-recovery
+  checks; defaults to `1`.
 - `GUPS_LOGN`: base-2 table-size exponent; defaults to `27` (1 GiB).
 - `GUPS_REPEATS`: GUPS kernel repetitions; defaults to `5`.
 - `GUPS_ACCESSES_PER_ELEMENT`: random accesses per thread; defaults to `32`.
@@ -310,6 +314,8 @@ The workflow accepts the following environment variables:
 - `NVIDIA_SMI_DEVICE`: physical GPU index or UUID used for diagnostics during
   direct runs. Set this when `CUDA_VISIBLE_DEVICES` remaps CUDA device ordinals.
 - `SOURCE_COMMIT`: source revision fallback when Git metadata is unavailable.
+- `HOST_HOSTNAME`: node name recorded in `metadata.json`; set automatically by
+  the Docker launcher and otherwise defaults to the local host name.
 
 Additional arguments are forwarded to every NVBench executable.
 

@@ -16,6 +16,9 @@ device="${DEVICE:-0}"
 build_only="${ARTIFACT_BUILD_ONLY:-0}"
 telemetry_interval="${GPU_TELEMETRY_INTERVAL:-5}"
 source_commit="${SOURCE_COMMIT:-}"
+host_hostname="${HOST_HOSTNAME:-$(hostname)}"
+throttle_threshold="${THROTTLE_THRESHOLD:-95}"
+throttle_recovery_delay="${THROTTLE_RECOVERY_DELAY:-1}"
 nvbench_args=("$@")
 
 if [[ "${build_only}" != "1" && "${telemetry_interval}" != "0" ]]; then
@@ -141,6 +144,8 @@ run_benchmark()
 
 common_axes=(
   --devices "${device}"
+  --throttle-threshold "${throttle_threshold}"
+  --throttle-recovery-delay "${throttle_recovery_delay}"
   --axis "NumInputs=${num_inputs}"
   --axis "FilterSizeMB=[${filter_sizes}]"
 )
@@ -199,7 +204,10 @@ python3 - \
   "${nvbench_args[*]}" \
   "${device}" \
   "${source_commit}" \
-  "${diagnostic_device}" <<'PY'
+  "${diagnostic_device}" \
+  "${host_hostname}" \
+  "${throttle_threshold}" \
+  "${throttle_recovery_delay}" <<'PY'
 import json
 import os
 import platform
@@ -222,6 +230,12 @@ def command(*args):
 git_commit = command("git", "rev-parse", "HEAD")
 git_status = command("git", "status", "--porcelain")
 diagnostic_device = sys.argv[9]
+host_hostname = sys.argv[10]
+
+
+def numeric_value(value):
+    parsed = float(value)
+    return int(parsed) if parsed.is_integer() else parsed
 
 
 def nvbench_gpu():
@@ -258,7 +272,7 @@ metadata = {
     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
     "git_commit": git_commit or sys.argv[8] or "unknown",
     "git_dirty": None if git_status is None else bool(git_status),
-    "hostname": platform.node(),
+    "hostname": host_hostname,
     "num_inputs": int(sys.argv[3]),
     "filter_sizes_mb": [int(value) for value in sys.argv[4].split(",")],
     "cuda_architectures": sys.argv[5],
@@ -270,6 +284,8 @@ metadata = {
     "host_compiler": command("c++", "--version"),
     "gpu": gpu,
     "nvidia_smi_device": diagnostic_device or None,
+    "nvbench_throttle_threshold_percent": numeric_value(sys.argv[11]),
+    "nvbench_throttle_recovery_delay_seconds": numeric_value(sys.argv[12]),
     "gpu_telemetry_collected": telemetry_collected,
     "gpu_telemetry_interval_seconds": (
         int(os.environ.get("GPU_TELEMETRY_INTERVAL", "5")) if telemetry_collected else None
